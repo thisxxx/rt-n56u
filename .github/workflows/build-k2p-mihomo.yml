@@ -16,6 +16,12 @@ name: Build K2P (mihomo)
 
 on:
   workflow_dispatch:
+    inputs:
+      variant:
+        description: "mihomo 变体: full=现役二进制原样 / lite=现场按精简 tag 交叉编译"
+        type: choice
+        options: [full, lite]
+        default: full
 
 permissions:
   contents: write
@@ -34,6 +40,12 @@ env:
   EASYTIER_SIZE: 6698364
   # yacd public/ 原始字节数 (45 个文件)
   YACD_UI_BYTES: 1135385
+  # ---- 二进制来源 ----
+  # easytier lite v0.2.1 (mipsel), CI 内下载解包, 不要在本地转存
+  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.1-20261031-ae09a40/easytier-lite-linux-mipsel.zip
+  # lite 变体的 mihomo 版本与精简 tag
+  MIHOMO_REF: v1.18.10
+  MIHOMO_TAGS: no_fake_tcp,no_tailscale,no_zerotier,no_easytier,with_low_memory
   # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
   SQUASHFS_BLOCK: 524288
 
@@ -83,6 +95,45 @@ jobs:
           if [ -d /usr/share/terminfo ] && [ ! -e /etc/terminfo/x ]; then
             sudo ln -sf /usr/share/terminfo/x /etc/terminfo/x || true
           fi
+
+      - name: 安装 Go (仅 lite 变体需要)
+        if: inputs.variant == 'lite'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: 准备二进制（easytier 新版 / 可选精简 mihomo）
+        run: |
+          set -euo pipefail
+          T=/opt/rt-n56u/trunk
+
+          # ---- easytier: 从 release 取 lite mipsel 包, 解出未压缩的 easytier-core ----
+          rm -rf /tmp/et && mkdir -p /tmp/et
+          curl -fL --retry 3 --retry-delay 5 -o /tmp/et.zip "$EASYTIER_URL"
+          unzip -q -o /tmp/et.zip -d /tmp/et
+          ET=$(find /tmp/et -type f -name 'easytier-core*' | head -1)
+          [ -n "$ET" ] || { echo "::error::压缩包里找不到 easytier-core"; find /tmp/et -maxdepth 2; exit 1; }
+          install -m 0755 "$ET" "$T/user/easytier/easytier-core"
+          EASYSZ=$(stat -c%s "$T/user/easytier/easytier-core")
+          echo "EASYTIER_SIZE=$EASYSZ" >> "$GITHUB_ENV"
+          echo "easytier-core: $EASYSZ 字节 ($(awk "BEGIN{printf \"%.3f\", $EASYSZ/1048576}") MiB)"
+
+          # ---- mihomo: lite 变体现场交叉编译 (MIPS32 小端软浮点, 全静态) ----
+          VARIANT="${{ inputs.variant || 'full' }}"
+          if [ "$VARIANT" = "lite" ]; then
+            echo "编译精简 mihomo: ref=$MIHOMO_REF tags=$MIHOMO_TAGS"
+            rm -rf /tmp/mihomo-src
+            git clone --depth 1 -b "$MIHOMO_REF" https://github.com/MetaCubeX/mihomo.git /tmp/mihomo-src
+            ( cd /tmp/mihomo-src && \
+              CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat \
+              go build -trimpath -ldflags "-s -w -buildid=" -tags "$MIHOMO_TAGS" -o /tmp/mihomo-lite . )
+            install -m 0755 /tmp/mihomo-lite "$T/user/mihomo/mihomo"
+          else
+            echo "使用仓库内现役 mihomo 二进制 (不重编)"
+          fi
+          MHSZ=$(stat -c%s "$T/user/mihomo/mihomo")
+          echo "MIHOMO_SIZE=$MHSZ" >> "$GITHUB_ENV"
+          echo "mihomo: $MHSZ 字节 ($(awk "BEGIN{printf \"%.3f\", $MHSZ/1048576}") MiB)  variant=$VARIANT"
 
       - name: 编译前校验（二进制字节数 / yacd / 模板开关 / 模块注册）
         run: |
@@ -273,7 +324,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: K2P-mihomo-${{ github.sha }}
+          name: K2P-mihomo-${{ inputs.variant || 'full' }}-${{ github.sha }}
           path: |
             /opt/images/K2P.trx
             /opt/images/md5sum.txt
@@ -284,8 +335,8 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: K2P-mihomo-1
-          name: K2P mihomo 固件 v1（体积验证版）
+          tag_name: K2P-mihomo-${{ inputs.variant || 'full' }}
+          name: K2P mihomo 固件（${{ inputs.variant || 'full' }} 变体）
           body: |
             斐讯 K2P A1/A2（MT7621A + MT7615D，16MB NOR / 128MB RAM）Padavan 固件，
             内置 **未压缩** mihomo（30,802,086 B）、easytier-lite v0.2.0（6,698,364 B）
