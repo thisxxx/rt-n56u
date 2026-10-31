@@ -1,5 +1,12 @@
 SRC_NAME=openvpn-2.4.x
 
+# 注意: 下面 configure 里加了 --disable-lz4
+# openvpn-2.4.x 默认开启 LZ4。交叉编译时 PKG_CHECK_MODULES 会用宿主机 pkg-config
+# 找到 liblz4.pc, 于是判定"有 lz4", 但 target sysroot 里并没有 lz4.h,
+# 结果 comp-lz4.c 编译直接报 fatal error: lz4.h: No such file or directory
+# (2026-10-31 云编译 run 41169540378 就是死在这里)。
+# 路由器上用 LZO 足够, 关掉 LZ4 顺带省一点体积。
+
 CFLAGS += -ffunction-sections -fdata-sections
 LDFLAGS += -Wl,--gc-sections
 
@@ -30,6 +37,7 @@ configure:
 		--disable-iproute2 \
 		--disable-management \
 		--disable-socks \
+		--disable-lz4 \
 		--enable-small \
 		--enable-multi \
 		--enable-server \

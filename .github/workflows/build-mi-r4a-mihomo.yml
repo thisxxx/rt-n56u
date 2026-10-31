@@ -3,6 +3,10 @@ name: Build MI-R4A (mihomo)
 # 仅构建 小米 R4A 千兆版 (MI-R4A / MT7621A / 16MB NOR / 128MB RAM) 单一固件，
 # 使用 trunk/configs/templates/MI-R4A.config（已开启 CONFIG_FIRMWARE_INCLUDE_MIHOMO=y）。
 #
+# 内置的是【未压缩】的 mihomo 原始二进制 (30,802,086 B / 29.38 MiB):
+# squashfs 用 xz 分块压缩, 内核 mmap 按需解压代码页, 运行时只驻留被访问的页面。
+# 不要换回 UPX 版 —— UPX 在 exec 时要把整个镜像解压到匿名内存, 128MB 无 swap 必 OOM。
+#
 # 说明：runner 固定 ubuntu-22.04 而非 ubuntu-latest。
 #       Padavan 是 2016 年前后的老构建系统，ubuntu-latest(24.04) 上
 #       libncurses5-dev / lib32z1 等依赖包已不存在，apt 直接失败。
@@ -19,8 +23,10 @@ permissions:
 env:
   toolchain_pkg: mipsel-linux-uclibc.tar.xz
   toolchain_url: https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1
-  # 14.50 MiB 分区上限
+  # 14.50 MiB 分区上限（firmware 分区实测 15,204,352 B）
   MAX_TRX_SIZE: 15204352
+  # 未压缩 mihomo 的精确字节数
+  MIHOMO_SIZE: 30802086
 
 jobs:
   build:
@@ -51,6 +57,9 @@ jobs:
             subversion cvs swig nodejs
           # 32 位运行库：部分预编译工具链需要，缺失不致命
           sudo apt-get install -y --no-install-recommends lib32z1 lib32stdc++6 || true
+          # terminfo 兜底：Padavan 里 ncurses 安装阶段的 terminfo 软链接报错只是噪声
+          # （不是上次编译失败的原因），装上 ncurses-base 让 /usr/share/terminfo 完整
+          sudo apt-get install -y --no-install-recommends ncurses-base || true
 
       - name: 准备 /opt/rt-n56u 与交叉工具链
         run: |
@@ -65,15 +74,24 @@ jobs:
                -C /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x
           ls /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x/bin | head -5
           rm -f "$RUNNER_TEMP/$toolchain_pkg"
+          # 宿主机 terminfo 兜底
+          sudo mkdir -p /etc/terminfo
+          if [ -d /usr/share/terminfo ] && [ ! -e /etc/terminfo/x ]; then
+            sudo ln -sf /usr/share/terminfo/x /etc/terminfo/x || true
+          fi
 
-      - name: 编译前校验（mihomo 是否就位）
+      - name: 编译前校验（二进制 / 配置 / 模块注册）
         run: |
           set -e
-          BIN=/opt/rt-n56u/trunk/user/mihomo/mihomo-linux-mipsle-softfloat
+          BIN=/opt/rt-n56u/trunk/user/mihomo/mihomo
           test -f "$BIN" || { echo "::error::mihomo 二进制缺失: $BIN"; exit 1; }
           SIZE=$(stat -c%s "$BIN")
-          echo "mihomo 二进制大小: $SIZE 字节"
-          [ "$SIZE" -eq 6331540 ] || { echo "::error::mihomo 二进制大小异常(应为 6331540): $SIZE"; exit 1; }
+          echo "mihomo 二进制大小: $SIZE 字节 (期望 $MIHOMO_SIZE, 未压缩版)"
+          [ "$SIZE" -eq "$MIHOMO_SIZE" ] || {
+            echo "::error::mihomo 二进制大小异常(应为 $MIHOMO_SIZE 未压缩版): $SIZE"
+            echo "::error::如果你放的是 UPX 版(约 6331540 字节), 请换回未压缩原始二进制"
+            exit 1
+          }
           # ELF32 LSB MIPS EXEC 检查
           MAGIC=$(od -An -tx1 -N20 "$BIN" | tr -d ' \n')
           echo "ELF 头: $MAGIC"
@@ -81,14 +99,28 @@ jobs:
             7f454c4601*0002000800*) echo "ELF 头校验通过 (ELF32 / MIPS / EXEC)" ;;
             *) echo "::error::mihomo 不是 MIPS 32 位小端可执行文件"; exit 1 ;;
           esac
+          # 静态链接检查: 不应引用动态加载器
+          if grep -aq "/lib/ld-uClibc\|/lib/ld-musl\|/lib/ld.so" "$BIN"; then
+            echo "::error::mihomo 疑似动态链接, 需要全静态二进制"; exit 1
+          fi
+          echo "静态链接检查通过 (无动态加载器引用)"
+
           grep -q '^CONFIG_FIRMWARE_INCLUDE_MIHOMO=y' \
                /opt/rt-n56u/trunk/configs/templates/MI-R4A.config \
                || { echo "::error::MI-R4A.config 未开启 CONFIG_FIRMWARE_INCLUDE_MIHOMO"; exit 1; }
           grep -q 'CONFIG_FIRMWARE_INCLUDE_MIHOMO.*+= mihomo' \
                /opt/rt-n56u/trunk/user/Makefile \
                || { echo "::error::trunk/user/Makefile 未注册 mihomo 模块"; exit 1; }
+          grep -q 'CONFIG_FIRMWARE_INCLUDE_EASYTIER.*+= easytier' \
+               /opt/rt-n56u/trunk/user/Makefile \
+               || { echo "::error::trunk/user/Makefile 未注册 easytier 模块"; exit 1; }
+          grep -q 'CONFIG_FIRMWARE_INCLUDE_EASYTIER is not set' \
+               /opt/rt-n56u/trunk/configs/templates/MI-R4A.config \
+               || echo "::warning::模板里 CONFIG_FIRMWARE_INCLUDE_EASYTIER 不是关闭状态, 确认二进制已就位"
           test -f /opt/rt-n56u/trunk/user/mihomo/mihomo-start \
                || { echo "::error::mihomo-start 启动脚本缺失"; exit 1; }
+          test -d /opt/rt-n56u/trunk/user/easytier \
+               || { echo "::error::easytier 模块目录缺失"; exit 1; }
           echo "编译前校验全部通过"
 
       - name: 编译固件 MI-R4A
@@ -97,31 +129,65 @@ jobs:
           cd /opt/rt-n56u/trunk
           fakeroot ./build_firmware_modify MI-R4A 2>&1 | tee /tmp/build.log
 
-      - name: 产物校验（体积 / mihomo 是否在 rootfs 内）
+      - name: 产物校验（体积 / mihomo 是否真的进了 squashfs）
         run: |
           set -euo pipefail
           cd /opt/rt-n56u/trunk
           ls -l images/
-          ls -l romfs/usr/bin/mihomo romfs/usr/bin/mihomo-start
 
+          echo "===== romfs 侧 ====="
+          ls -l romfs/usr/bin/mihomo romfs/usr/bin/mihomo-start
+          ROMFS_MIHOMO=$(stat -c%s romfs/usr/bin/mihomo)
+          echo "romfs 内 mihomo: $ROMFS_MIHOMO 字节"
+          [ "$ROMFS_MIHOMO" -eq "$MIHOMO_SIZE" ] || {
+            echo "::error::romfs 里的 mihomo 大小异常: $ROMFS_MIHOMO (期望 $MIHOMO_SIZE)"; exit 1; }
+
+          echo "===== squashfs 侧 ====="
+          ROOTFS=$(stat -c%s images/ramdisk)
+          echo "rootfs(images/ramdisk, squashfs-xz): $ROOTFS 字节 ($(awk "BEGIN{printf \"%.2f\", $ROOTFS/1048576}") MiB)"
+
+          UNSQ=""
+          for c in ./tools/mksquashfs_xz/unsquashfs "$(command -v unsquashfs || true)" ; do
+            if [ -n "$c" ] && [ -x "$c" ]; then UNSQ="$c"; break; fi
+          done
+          if [ -n "$UNSQ" ]; then
+            echo "使用 $UNSQ 抽查 squashfs"
+            "$UNSQ" -ll images/ramdisk > /tmp/sq.txt 2>/dev/null || "$UNSQ" -l images/ramdisk > /tmp/sq.txt
+            grep -E 'usr/bin/mihomo$' /tmp/sq.txt || { echo "::error::squashfs 内找不到 /usr/bin/mihomo"; exit 1; }
+            SQ_SIZE=$(awk '/usr\/bin\/mihomo$/ {print $3}' /tmp/sq.txt | head -1)
+            echo "squashfs 内 /usr/bin/mihomo 大小: ${SQ_SIZE} 字节"
+            [ "$SQ_SIZE" -eq "$MIHOMO_SIZE" ] || {
+              echo "::error::squashfs 里的 mihomo 大小异常: $SQ_SIZE (期望 $MIHOMO_SIZE)"; exit 1; }
+            grep -E 'usr/bin/mihomo-start$' /tmp/sq.txt || { echo "::error::squashfs 内找不到 /usr/bin/mihomo-start"; exit 1; }
+            echo "squashfs 抽查通过: mihomo 已完整进只读区"
+          else
+            echo "::warning::没有可用的 unsquashfs，跳过 squashfs 抽查（romfs 检查已通过）"
+          fi
+
+          echo "===== 最终固件 ====="
           TRX=$(ls images/*.trx | head -1)
           SIZE=$(stat -c%s "$TRX")
+          MARGIN=$((MAX_TRX_SIZE - SIZE))
           echo "TRX: $TRX"
-          echo "TRX 大小: $SIZE 字节 ($(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}") MiB)"
-          echo "分区上限: $MAX_TRX_SIZE 字节 (14.50 MiB)"
+          echo "TRX 字节数: $SIZE"
+          echo "TRX 体积:   $(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}") MiB"
+          echo "分区上限:   $MAX_TRX_SIZE 字节 (14.50 MiB)"
+          echo "剩余余量:   $MARGIN 字节 ($(awk "BEGIN{printf \"%.2f\", $MARGIN/1048576}") MiB)"
           if [ "$SIZE" -gt "$MAX_TRX_SIZE" ]; then
-            echo "::error::固件体积超限，无法刷入 16MB NOR 的 R4A"
+            echo "::error::固件体积超限 $SIZE > $MAX_TRX_SIZE，无法刷入 16MB NOR 的 R4A"
             exit 1
           fi
-
-          # 从 squashfs 镜像中反查，确认 mihomo 真的进了只读区
-          if unsquashfs -l images/ramdisk 2>/dev/null | grep -q 'usr/bin/mihomo$' ; then
-            echo "squashfs 内含 /usr/bin/mihomo"
-          else
-            echo "::warning::unsquashfs 未能列出 mihomo（romfs 检查已通过，仅供参考）"
-          fi
+          {
+            echo "| 项目 | 字节 | MiB |"
+            echo "|---|---|---|"
+            echo "| rootfs (squashfs) | $ROOTFS | $(awk "BEGIN{printf \"%.2f\", $ROOTFS/1048576}") |"
+            echo "| trx 合计 | $SIZE | $(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}") |"
+            echo "| 分区上限 | $MAX_TRX_SIZE | 14.50 |"
+            echo "| 剩余余量 | $MARGIN | $(awk "BEGIN{printf \"%.2f\", $MARGIN/1048576}") |"
+          } | tee size-report.md
 
           cp -f "$TRX" /opt/images/MI-R4A.trx
+          cp -f size-report.md /opt/images/size-report.md
           cd /opt/images && md5sum MI-R4A.trx | tee md5sum.txt
 
       - name: 上传 artifact
@@ -131,6 +197,7 @@ jobs:
           path: |
             /opt/images/MI-R4A.trx
             /opt/images/md5sum.txt
+            /opt/images/size-report.md
           if-no-files-found: error
 
       - name: 上传到 Release
@@ -139,13 +206,20 @@ jobs:
           tag_name: MI-R4A-mihomo-${{ github.run_number }}
           name: MI-R4A mihomo 固件 build ${{ github.run_number }}
           body: |
-            小米 R4A 千兆版 (MI-R4A) 固件，内置 mihomo (UPX 压缩 mipsle softfloat 静态二进制)。
+            小米 R4A 千兆版 (MI-R4A) 固件，内置 **未压缩** 的 mihomo
+            (mipsle softfloat 全静态二进制，30,802,086 字节，squashfs xz 压缩后约 5.99 MiB)。
+
+            为什么不用 UPX 版：squashfs 按需分页，只驻留被访问的代码页；
+            UPX 会在 exec 时把整个 29.38 MiB 解压到匿名内存，128MB 无 swap 的机器必 OOM。
+
             - 源码 commit: ${{ github.sha }}
-            - 使用方式：刷入后在「系统管理 → 服务 → 启动脚本」加入 `/usr/bin/mihomo-start &`，
-              并把配置放到 `/etc/storage/mihomo/config.yaml`
+            - 部署：刷入后在「系统管理 → 服务 → 启动脚本」加一行 `/usr/bin/mihomo-start &`，
+              再把订阅地址写进 `/etc/storage/mihomo/sub_url.txt`
+            - 详见仓库内 trunk/user/mihomo/mihomo-start 顶部注释
           files: |
             /opt/images/MI-R4A.trx
             /opt/images/md5sum.txt
+            /opt/images/size-report.md
           fail_on_unmatched_files: true
 
       - name: 失败时输出日志尾部

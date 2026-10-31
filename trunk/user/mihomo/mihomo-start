@@ -1,47 +1,248 @@
 #!/bin/sh
 #
-# mihomo 启动包装脚本 (Padavan / 小米 R4A 千兆版 专用)
+# mihomo 启动脚本 (Padavan / 小米 R4A 千兆版, 16MB flash / 128MB RAM)
+# 安装位置: /usr/bin/mihomo-start (squashfs 只读区, 由固件编入)
 #
 # 用法:
-#   在 Web 界面「系统管理 -> 服务 -> 启动脚本(started_script.sh)」中加入一行:
-#       /usr/bin/mihomo-start &
+#   mihomo-start            启动 (开机时由 started_script.sh 调用, 已在跑则跳过)
+#   mihomo-start update     重新拉取订阅 -> 应用 sed 补丁 -> 校验 -> 重启
+#   mihomo-start restart    重启进程 (不重新下载)
+#   mihomo-start stop       停止进程并清理 iptables 规则
+#   mihomo-start et-start   只启动 EasyTier (二进制和配置都在才生效)
+#   mihomo-start et-stop    只停止 EasyTier
 #
-# 约定路径:
-#   配置目录: /etc/storage/mihomo/        (storage 分区仅 512 KiB, 注意配置体积)
-#   配置文件: /etc/storage/mihomo/config.yaml
-#   运行日志: /tmp/mihomo.log             (/tmp 为内存盘, 重启清空)
+# ============ 关于内存 (重要) ============
 #
-# 注意:
-#   本脚本只负责拉起 mihomo 进程, 不负责下发 TPROXY/REDIRECT 防火墙规则。
-#   内核已内置 xt_TPROXY.ko / xt_socket.ko / ipt_REDIRECT.ko,
-#   透明代理所需的 iptables 规则请自行在 started_script.sh 中一并添加,
-#   或在 config.yaml 中启用 tproxy-port 后自行维护规则。
+# 固件里的 /usr/bin/mihomo 是【未压缩的原始二进制】(29.38 MiB)。
+# 它躺在 squashfs 里, 内核 mmap 后按需解压代码页, 只驻留真正被访问到的
+# 那部分页面, 运行时内存远小于 29 MiB。
+# 反过来, UPX 版在 exec 时要一次性把整个镜像解压到匿名内存, 128MB 无 swap
+# 的机器上必 OOM —— 这就是之前"跑一会就死"的根因, 不要再换回 UPX 版。
 #
+# ============ 用户配置槽位 (全部在 /etc/storage/mihomo/, 重启不丢) ============
+#
+# 1. 订阅地址:
+#      /etc/storage/mihomo/sub_url.txt      一行, 填 clash 格式订阅 URL
+#
+# 2. 自定义 sed 钩子 (每次更新规则后自动执行):
+#      /etc/storage/mihomo/my_sed.sh        可执行脚本
+#      参数 $1 = 刚拉取的配置文件路径 (/tmp/mihomo/config.yaml.new)
+#      执行时机: 内置通用补丁之后、mihomo 校验之前 (校验失败会回滚到旧配置)
+#      示例内容:
+#        #!/bin/sh
+#        CFG="$1"
+#        sed -i 's/^log-level: warning/log-level: info/' "$CFG"
+#      要求: chmod +x, 幂等 (重复执行结果一致), 不要输出到 stdout
+#
+# 3. 运行时文件 (RAM, 重启消失):
+#      /tmp/mihomo/config.yaml              运行配置 (最后一次校验通过版)
+#      /tmp/mihomo/config.yaml.ok           同上备份, 排错用
+#      /tmp/mihomo.log                      运行日志
+#
+# 注意: 订阅配置体积通常 400KB+, 放不进 512KB 的 /etc/storage,
+#       所以 storage 只存 URL 和脚本, 配置本体住 /tmp, 开机联网后重新拉取。
+#
+# ============ EasyTier (可选) ============
+#
+#   /usr/bin/easytier-core                 由 CONFIG_FIRMWARE_INCLUDE_EASYTIER 编入
+#   /etc/storage/easytier/config.toml      EasyTier 的 -c 配置文件
+# 两者都在时, mihomo-start 会顺带拉起它。日志: /tmp/easytier.log
+# 本脚本的 iptables 规则只挂 PREROUTING、不碰 OUTPUT,
+# 所以 EasyTier 这种本机进程的出站流量天然不受影响。
+#
+# =============================================================================
 
 MIHOMO_BIN=/usr/bin/mihomo
-MIHOMO_DIR=/etc/storage/mihomo
-MIHOMO_CFG=$MIHOMO_DIR/config.yaml
-MIHOMO_LOG=/tmp/mihomo.log
+STOR=/etc/storage/mihomo
+RUNDIR=/tmp/mihomo
+CFG=$RUNDIR/config.yaml
+CFG_NEW=$RUNDIR/config.yaml.new
+CFG_BAK=$RUNDIR/config.yaml.ok
+SUB_URL_FILE=$STOR/sub_url.txt
+USER_SED=$STOR/my_sed.sh
+LOG=/tmp/mihomo.log
 
-if [ ! -x "$MIHOMO_BIN" ] ; then
-	echo "mihomo: 二进制不存在: $MIHOMO_BIN" >&2
-	exit 1
-fi
+ET_BIN=/usr/bin/easytier-core
+ET_CONF=/etc/storage/easytier/config.toml
+ET_LOG=/tmp/easytier.log
 
-if [ ! -f "$MIHOMO_CFG" ] ; then
-	echo "mihomo: 配置不存在: $MIHOMO_CFG" >&2
-	echo "mihomo: 请先上传 config.yaml 到该目录 (Web 文件管理 / scp 均可)" >&2
-	exit 1
-fi
+# ---- 端口约定 (与下方 iptables 规则一一对应, 改这里需同步改规则) ----
+PROXY_PORT=7892      # TCP REDIRECT + UDP TPROXY 共用
+DNS_PORT=8053        # mihomo 内置 DNS 监听
+HTTP_PORT=7893       # mixed-port (浏览器手动填代理用)
+MARK=1               # fwmark
+RT_TABLE=100         # 策略路由表号
 
-# 防重复启动
-RUNNING=`pidof mihomo`
-if [ -n "$RUNNING" ] ; then
-	echo "mihomo: 已在运行 (pid $RUNNING)"
-	exit 0
-fi
+log() { logger -t "【mihomo】" "$*"; echo "mihomo: $*"; }
 
-cd "$MIHOMO_DIR" || exit 1
+# ---------------------------------------------------------------------------
+# 下载订阅 + 内置 sed 补丁 + 用户 my_sed.sh 钩子 + 校验
+# 成功返回 0
+# ---------------------------------------------------------------------------
+do_fetch() {
+	[ -s "$SUB_URL_FILE" ] || { log "没有订阅地址: $SUB_URL_FILE"; return 1; }
+	SUB_URL=$(head -n1 "$SUB_URL_FILE" | tr -d '\r\n ')
+	[ -n "$SUB_URL" ] || { log "订阅地址为空"; return 1; }
 
-nohup "$MIHOMO_BIN" -d "$MIHOMO_DIR" -f "$MIHOMO_CFG" >"$MIHOMO_LOG" 2>&1 &
-echo "mihomo: 已启动, 日志: $MIHOMO_LOG"
+	mkdir -p "$RUNDIR"
+	log "拉取订阅..."
+	wget -q -T 20 -O "$CFG_NEW" \
+		--user-agent="clash.meta/v1.18.0" \
+		"$SUB_URL" || { log "下载失败: $SUB_URL"; return 1; }
+	[ -s "$CFG_NEW" ] || { log "下载内容为空"; return 1; }
+
+	# ---- 内置通用补丁 (只动顶层单行键, sed 安全) ----
+	sed -i \
+		-e "s/^allow-lan:.*/allow-lan: true/" \
+		-e "s/^log-level:.*/log-level: warning/" \
+		-e "s/^external-controller:.*/external-controller: 0.0.0.0:9090/" \
+		-e "s/^mixed-port:.*/mixed-port: $HTTP_PORT/" \
+		-e "s/^redir-port:.*/redir-port: $PROXY_PORT/" \
+		-e "s/^tproxy-port:.*/tproxy-port: $PROXY_PORT/" \
+		"$CFG_NEW"
+	# 键不存在则插入
+	grep -q "^mixed-port:"  "$CFG_NEW" || sed -i "1i mixed-port: $HTTP_PORT"  "$CFG_NEW"
+	grep -q "^redir-port:"  "$CFG_NEW" || sed -i "1i redir-port: $PROXY_PORT"  "$CFG_NEW"
+	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $PROXY_PORT" "$CFG_NEW"
+	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向
+	grep -q "^dns:" "$CFG_NEW" || sed -i "1i dns: { enable: true, listen: 0.0.0.0:$DNS_PORT, enhanced-mode: redir-host }" "$CFG_NEW"
+
+	# ---- 用户自定义 sed 钩子: 每次更新规则后必执行 ----
+	if [ -x "$USER_SED" ]; then
+		log "执行用户 sed 钩子: $USER_SED"
+		"$USER_SED" "$CFG_NEW" >/dev/null 2>&1
+	elif [ -f "$USER_SED" ]; then
+		log "警告: $USER_SED 存在但无执行权限, 已用 sh 执行"
+		sh "$USER_SED" "$CFG_NEW" >/dev/null 2>&1
+	fi
+
+	# ---- 校验 (失败则保留旧配置, 不影响当前运行) ----
+	if ! "$MIHOMO_BIN" -t -d "$RUNDIR" -f "$CFG_NEW" >"$RUNDIR/test.log" 2>&1; then
+		log "配置校验失败, 保留原配置. 详情: $RUNDIR/test.log"
+		head -5 "$RUNDIR/test.log" >> "$LOG" 2>/dev/null
+		return 1
+	fi
+
+	mv -f "$CFG_NEW" "$CFG"
+	cp -f "$CFG" "$CFG_BAK"
+	log "配置更新完成 ($(wc -c < "$CFG") 字节)"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# iptables 透明代理规则 (TCP=REDIRECT, UDP=TPROXY, 仅接管 LAN 侧 PREROUTING)
+# 路由器自身流量走 OUTPUT 链不被接管 => mihomo / EasyTier 出站天然无环路
+# ---------------------------------------------------------------------------
+fw_start() {
+	# 策略路由: 带标记的 UDP 包送回本机
+	ip rule del fwmark $MARK table $RT_TABLE 2>/dev/null
+	ip rule add fwmark $MARK table $RT_TABLE
+	ip route del local 0.0.0.0/0 dev lo table $RT_TABLE 2>/dev/null
+	ip route add local 0.0.0.0/0 dev lo table $RT_TABLE
+
+	iptables -t nat    -N MIHOMO_TCP 2>/dev/null;  iptables -t nat    -F MIHOMO_TCP
+	iptables -t mangle -N MIHOMO_UDP 2>/dev/null;  iptables -t mangle -F MIHOMO_UDP
+	iptables -t nat    -N MIHOMO_DNS 2>/dev/null;  iptables -t nat    -F MIHOMO_DNS
+
+	# 排除保留/内网地址
+	for NET in 0.0.0.0/8 10.0.0.0/8 127.0.0.0/8 169.254.0.0/16 \
+	           172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+		iptables -t nat    -A MIHOMO_TCP -d $NET -j RETURN
+		iptables -t mangle -A MIHOMO_UDP -d $NET -j RETURN
+	done
+
+	iptables -t nat    -A MIHOMO_TCP -p tcp -j REDIRECT --to-ports $PROXY_PORT
+	iptables -t mangle -A MIHOMO_UDP -p udp -m mark ! --mark $MARK \
+	                   -j TPROXY --on-port $PROXY_PORT --tproxy-mark $MARK
+	# DNS 劫持: LAN 发往任意地址的 53 端口 -> mihomo DNS
+	iptables -t nat    -A MIHOMO_DNS -p udp --dport 53 -j REDIRECT --to-ports $DNS_PORT
+	iptables -t nat    -A MIHOMO_DNS -p tcp --dport 53 -j REDIRECT --to-ports $DNS_PORT
+
+	# 只挂 PREROUTING, 不碰 OUTPUT: EasyTier 等本机进程出站不受影响
+	iptables -t nat    -I PREROUTING -j MIHOMO_TCP
+	iptables -t mangle -I PREROUTING -j MIHOMO_UDP
+	iptables -t nat    -I PREROUTING -j MIHOMO_DNS
+	log "防火墙规则已下发 (TCP REDIRECT->$PROXY_PORT, UDP TPROXY->$PROXY_PORT, DNS->$DNS_PORT)"
+}
+
+fw_stop() {
+	iptables -t nat    -D PREROUTING -j MIHOMO_DNS 2>/dev/null
+	iptables -t nat    -D PREROUTING -j MIHOMO_TCP 2>/dev/null
+	iptables -t mangle -D PREROUTING -j MIHOMO_UDP 2>/dev/null
+	iptables -t nat    -F MIHOMO_TCP 2>/dev/null;  iptables -t nat    -X MIHOMO_TCP 2>/dev/null
+	iptables -t mangle -F MIHOMO_UDP 2>/dev/null;  iptables -t mangle -X MIHOMO_UDP 2>/dev/null
+	iptables -t nat    -F MIHOMO_DNS 2>/dev/null;  iptables -t nat    -X MIHOMO_DNS 2>/dev/null
+	ip rule del fwmark $MARK table $RT_TABLE 2>/dev/null
+	ip route del local 0.0.0.0/0 dev lo table $RT_TABLE 2>/dev/null
+	log "防火墙规则已清理"
+}
+
+# ---------------------------------------------------------------------------
+# EasyTier: 二进制和配置都在才启动, 缺一个就安静跳过 (不阻塞 mihomo)
+# ---------------------------------------------------------------------------
+et_start() {
+	[ -x "$ET_BIN" ] || return 0
+	[ -f "$ET_CONF" ] || { log "EasyTier 已编入但无配置 ($ET_CONF), 跳过"; return 0; }
+	RUNNING=$(pidof easytier-core)
+	[ -n "$RUNNING" ] && { log "EasyTier 已在运行 (pid $RUNNING)"; return 0; }
+	# 128MB 机器保命参数, 与 mihomo 同理
+	GOMEMLIMIT="${EASYTIER_MEMLIMIT:-32MiB}" GOGC=50 GOMAXPROCS=2 \
+		nohup "$ET_BIN" -c "$ET_CONF" >>"$ET_LOG" 2>&1 &
+	sleep 1
+	if pidof easytier-core >/dev/null; then
+		log "EasyTier 已启动 (pid $(pidof easytier-core)), 配置: $ET_CONF"
+	else
+		log "EasyTier 启动失败, 查看日志: $ET_LOG"
+		tail -5 "$ET_LOG" 2>/dev/null
+	fi
+}
+
+et_stop() {
+	[ -x "$ET_BIN" ] || return 0
+	pidof easytier-core >/dev/null || return 0
+	killall easytier-core 2>/dev/null
+	log "EasyTier 已停止"
+}
+
+do_start() {
+	[ -x "$MIHOMO_BIN" ] || { log "二进制不存在: $MIHOMO_BIN"; exit 1; }
+	RUNNING=$(pidof mihomo)
+	[ -n "$RUNNING" ] && { echo "mihomo 已在运行 (pid $RUNNING)"; exit 0; }
+	# /tmp 无可用配置则先拉取 (开机首次必走)
+	[ -f "$CFG" ] || { do_fetch || exit 1; }
+	mkdir -p "$RUNDIR"
+	cd "$RUNDIR" || exit 1
+	# 128MB 无 swap 机器的保命参数:
+	#   GOMEMLIMIT  强制 Go 堆上限 (mihomo Go>=1.19 才支持), 防止规则解析吃爆内存被 OOM
+	#   GOGC=40     更频繁 GC, 用 CPU 换内存 (MT7621 双核扛得住)
+	#   GOMAXPROCS=2
+	GOMEMLIMIT="${MIHOMO_MEMLIMIT:-48MiB}" GOGC=40 GOMAXPROCS=2 \
+		nohup "$MIHOMO_BIN" -d "$RUNDIR" -f "$CFG" >>"$LOG" 2>&1 &
+	sleep 2
+	pidof mihomo >/dev/null || { log "启动失败, 查看日志: $LOG"; tail -5 "$LOG"; exit 1; }
+	fw_start
+	et_start
+	log "已启动 (pid $(pidof mihomo)), 订阅: $SUB_URL_FILE, 自定义sed: $USER_SED"
+}
+
+do_stop() {
+	et_stop
+	killall mihomo 2>/dev/null
+	fw_stop
+}
+
+case "$1" in
+	update)
+		if do_fetch; then
+			do_stop
+			sleep 1
+			do_start
+		fi
+		;;
+	restart) do_stop; sleep 1; do_start ;;
+	stop)    do_stop ;;
+	et-start) et_start ;;
+	et-stop)  et_stop ;;
+	start|"") do_start ;;
+	*) echo "用法: mihomo-start [start|update|restart|stop|et-start|et-stop]"; exit 1 ;;
+esac
