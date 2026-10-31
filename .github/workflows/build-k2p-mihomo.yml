@@ -111,8 +111,19 @@ jobs:
           rm -rf /tmp/et && mkdir -p /tmp/et
           curl -fL --retry 3 --retry-delay 5 -o /tmp/et.zip "$EASYTIER_URL"
           unzip -q -o /tmp/et.zip -d /tmp/et
-          ET=$(find /tmp/et -type f -name 'easytier-core*' | head -1)
-          [ -n "$ET" ] || { echo "::error::压缩包里找不到 easytier-core"; find /tmp/et -maxdepth 2; exit 1; }
+          ET=$(find /tmp/et -type f \( -name 'easytier-lite*' -o -name 'easytier-core*' \) | head -1)
+          [ -n "$ET" ] || { echo "::error::压缩包里找不到 easytier 二进制"; unzip -l /tmp/et.zip; exit 1; }
+          echo "包内取到: $ET ($(stat -c%s "$ET") 字节)"
+          # release 里发布的是 UPX(lzma) 包, 必须先解开: UPX 版运行时会整体解压进匿名内存, 128MB 机器会 OOM
+          if head -c 512 "$ET" | grep -aq 'UPX!'; then
+            echo "检测到 UPX 壳, 解包..."
+            curl -fsSL --retry 3 -o /tmp/upx.tar.xz \
+              "https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz"
+            tar -xJf /tmp/upx.tar.xz -C /tmp
+            /tmp/upx-4.2.4-amd64_linux/upx -d -o /tmp/easytier.raw "$ET" >/dev/null
+            ET=/tmp/easytier.raw
+            echo "解包后: $(stat -c%s "$ET") 字节"
+          fi
           install -m 0755 "$ET" "$T/user/easytier/easytier-core"
           EASYSZ=$(stat -c%s "$T/user/easytier/easytier-core")
           echo "EASYTIER_SIZE=$EASYSZ" >> "$GITHUB_ENV"
