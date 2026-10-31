@@ -96,11 +96,14 @@ do_fetch() {
 		-e "s/^allow-lan:.*/allow-lan: true/" \
 		-e "s/^log-level:.*/log-level: warning/" \
 		-e "s/^external-controller:.*/external-controller: 0.0.0.0:9090/" \
+		-e "s/^external-ui:.*/external-ui: \/usr\/share\/mihomo\/ui/" \
 		-e "s/^mixed-port:.*/mixed-port: $HTTP_PORT/" \
 		-e "s/^redir-port:.*/redir-port: $PROXY_PORT/" \
 		-e "s/^tproxy-port:.*/tproxy-port: $PROXY_PORT/" \
 		"$CFG_NEW"
 	# 键不存在则插入
+	grep -q "^external-controller:" "$CFG_NEW" || sed -i "1i external-controller: 0.0.0.0:9090" "$CFG_NEW"
+	grep -q "^external-ui:" "$CFG_NEW" || sed -i "1i external-ui: /usr/share/mihomo/ui" "$CFG_NEW"
 	grep -q "^mixed-port:"  "$CFG_NEW" || sed -i "1i mixed-port: $HTTP_PORT"  "$CFG_NEW"
 	grep -q "^redir-port:"  "$CFG_NEW" || sed -i "1i redir-port: $PROXY_PORT"  "$CFG_NEW"
 	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $PROXY_PORT" "$CFG_NEW"
@@ -223,6 +226,10 @@ do_start() {
 	fw_start
 	et_start
 	log "已启动 (pid $(pidof mihomo)), 订阅: $SUB_URL_FILE, 自定义sed: $USER_SED"
+	# YACD 面板: 静态资源由固件编入 /usr/share/mihomo/ui, 由配置里的 external-ui 指过去
+	LANIP=$(nvram get lan_ipaddr 2>/dev/null)
+	[ -n "$LANIP" ] || LANIP=192.168.2.1
+	log "YACD 面板: http://$LANIP:9090/ui/"
 }
 
 do_stop() {

@@ -1,0 +1,305 @@
+name: Build K2P (mihomo)
+
+# 斐讯 K2P A1/A2 (MT7621A + MT7615D DBDC / 16MB NOR / 128MB RAM) 专用构建。
+#
+# 与 R4A 的 build-mi-r4a-mihomo.yml 完全独立（互不干扰，R4A 那份保持不动）。
+# 使用 trunk/configs/templates/K2P_nano.config，已开：
+#   CONFIG_FIRMWARE_INCLUDE_MIHOMO=y    /usr/bin/mihomo        30,802,086 B 未压缩
+#   CONFIG_FIRMWARE_INCLUDE_EASYTIER=y  /usr/bin/easytier-core  6,698,364 B 未压缩
+#   yacd 面板静态资源                   /usr/share/mihomo/ui/   45 个文件 1,135,385 B
+#
+# 本轮目标是【验证体积能否装进 16MB NOR】，web 界面改造不在范围内。
+#
+# 为什么钉 ubuntu-22.04 而不是 ubuntu-latest：
+#   Padavan 是 2016 年前后的老构建系统，24.04 上 libncurses5-dev / lib32z1
+#   等依赖包已不存在，apt 直接失败（R4A 那份 workflow 已踩过这个坑）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DEVICE: K2P_nano
+  toolchain_pkg: mipsel-linux-uclibc.tar.xz
+  toolchain_url: https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1
+  # K2P firmware 分区: 0xa0000 起, 15.375 MiB = 16,121,856 B
+  # 自限 15.0 MiB 留安全余量
+  MAX_TRX_SIZE: 15728640
+  PART_SIZE: 16121856
+  # 未压缩 mihomo 的精确字节数
+  MIHOMO_SIZE: 30802086
+  # 未压缩 easytier-lite v0.2.0 的精确字节数
+  EASYTIER_SIZE: 6698364
+  # yacd public/ 原始字节数 (45 个文件)
+  YACD_UI_BYTES: 1135385
+  # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
+  SQUASHFS_BLOCK: 524288
+
+jobs:
+  build:
+    name: build K2P_nano (mihomo + easytier + yacd)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget cpio rsync unzip p7zip-full fakeroot \
+            build-essential gcc-multilib g++-multilib \
+            zlib1g-dev libmpc-dev libgmp-dev libmpfr-dev \
+            gawk flex bison texinfo help2man libtool-bin libltdl-dev \
+            gperf gettext autopoint pkg-config python3-docutils \
+            libncurses5-dev libncursesw5-dev u-boot-tools squashfs-tools \
+            subversion cvs swig nodejs
+          sudo apt-get install -y --no-install-recommends lib32z1 lib32stdc++6 || true
+          sudo apt-get install -y --no-install-recommends ncurses-base || true
+
+      - name: 准备 /opt/rt-n56u 与交叉工具链
+        run: |
+          set -e
+          sudo mkdir -p /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x /opt/images
+          sudo rsync -a --exclude '.git' ./ /opt/rt-n56u/
+          sudo chown -R "$(id -u):$(id -g)" /opt/rt-n56u /opt/images
+          curl -L --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/$toolchain_pkg" \
+               "$toolchain_url/$toolchain_pkg"
+          sudo tar -xf "$RUNNER_TEMP/$toolchain_pkg" \
+               -C /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x
+          ls /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x/bin | head -5
+          rm -f "$RUNNER_TEMP/$toolchain_pkg"
+          sudo mkdir -p /etc/terminfo
+          if [ -d /usr/share/terminfo ] && [ ! -e /etc/terminfo/x ]; then
+            sudo ln -sf /usr/share/terminfo/x /etc/terminfo/x || true
+          fi
+
+      - name: 编译前校验（二进制字节数 / yacd / 模板开关 / 模块注册）
+        run: |
+          set -e
+          T=/opt/rt-n56u/trunk
+
+          # ---- 1. mihomo ----
+          BIN=$T/user/mihomo/mihomo
+          test -f "$BIN" || { echo "::error::mihomo 二进制缺失: $BIN"; exit 1; }
+          SIZE=$(stat -c%s "$BIN")
+          echo "mihomo: $SIZE 字节 (期望 $MIHOMO_SIZE)"
+          [ "$SIZE" -eq "$MIHOMO_SIZE" ] || {
+            echo "::error::mihomo 大小异常(应为 $MIHOMO_SIZE 未压缩版): $SIZE"
+            echo "::error::UPX 版约 6,331,540 字节, 请换回未压缩原始二进制"
+            exit 1; }
+          MAGIC=$(od -An -tx1 -N20 "$BIN" | tr -d ' \n')
+          case "$MAGIC" in
+            7f454c4601*0002000800*) echo "mihomo ELF 头校验通过 (ELF32 / MIPS / 小端)" ;;
+            *) echo "::error::mihomo 不是 MIPS32 小端可执行文件: $MAGIC"; exit 1 ;;
+          esac
+          grep -aq "/lib/ld-uClibc\|/lib/ld-musl\|/lib/ld.so" "$BIN" \
+            && { echo "::error::mihomo 疑似动态链接, 需要全静态"; exit 1; } || true
+
+          # ---- 2. easytier-core ----
+          ETBIN=$T/user/easytier/easytier-core
+          test -f "$ETBIN" || { echo "::error::easytier-core 缺失: $ETBIN"; exit 1; }
+          ETSIZE=$(stat -c%s "$ETBIN")
+          echo "easytier-core: $ETSIZE 字节 (期望 $EASYTIER_SIZE)"
+          [ "$ETSIZE" -eq "$EASYTIER_SIZE" ] || {
+            echo "::error::easytier-core 大小异常(应为 $EASYTIER_SIZE): $ETSIZE"
+            echo "::error::UPX 版约 1,769,144 字节, 请换回未压缩原始二进制"
+            exit 1; }
+          ETMAGIC=$(od -An -tx1 -N20 "$ETBIN" | tr -d ' \n')
+          case "$ETMAGIC" in
+            7f454c4601*0002000800*) echo "easytier ELF 头校验通过 (ELF32 / MIPS / 小端)" ;;
+            *) echo "::error::easytier-core 不是 MIPS32 小端可执行文件: $ETMAGIC"; exit 1 ;;
+          esac
+
+          # ---- 3. yacd 面板 ----
+          UI=$T/user/mihomo/ui
+          test -f "$UI/index.html" || { echo "::error::yacd 面板缺失: $UI/index.html"; exit 1; }
+          UIN=$(find "$UI" -type f | wc -l)
+          UIB=$(find "$UI" -type f -printf '%s\n' | awk '{s+=$1} END{print s}')
+          echo "yacd: $UIN 个文件, $UIB 字节 (期望 45 个 / $YACD_UI_BYTES 字节)"
+          [ "$UIN" -eq 45 ] || { echo "::error::yacd 文件数异常: $UIN"; exit 1; }
+          [ "$UIB" -eq "$YACD_UI_BYTES" ] || { echo "::error::yacd 字节数异常: $UIB"; exit 1; }
+          grep -q 'ROMFSINST.*ui /usr/share/mihomo/ui' "$T/user/mihomo/Makefile" \
+            || { echo "::error::mihomo/Makefile 未安装 ui 目录"; exit 1; }
+          grep -q 'external-ui:' "$T/user/mihomo/mihomo-start" \
+            || { echo "::error::mihomo-start 未配置 external-ui"; exit 1; }
+
+          # ---- 4. 模板开关 + 模块注册 ----
+          CFG=$T/configs/templates/$DEVICE.config
+          test -f "$CFG" || { echo "::error::模板不存在: $CFG"; exit 1; }
+          grep -q '^CONFIG_FIRMWARE_INCLUDE_MIHOMO=y'    "$CFG" || { echo "::error::$DEVICE 未开 MIHOMO"; exit 1; }
+          grep -q '^CONFIG_FIRMWARE_INCLUDE_EASYTIER=y'  "$CFG" || { echo "::error::$DEVICE 未开 EASYTIER"; exit 1; }
+          grep -q 'CONFIG_FIRMWARE_INCLUDE_MIHOMO.*+= mihomo'   "$T/user/Makefile" || { echo "::error::user/Makefile 未注册 mihomo"; exit 1; }
+          grep -q 'CONFIG_FIRMWARE_INCLUDE_EASYTIER.*+= easytier' "$T/user/Makefile" || { echo "::error::user/Makefile 未注册 easytier"; exit 1; }
+          echo "--- 体积相关开关现状 ---"
+          grep -E '^CONFIG_FIRMWARE_(INCLUDE|ENABLE)_(MIHOMO|EASYTIER|IPSET|OPENSSH|DROPBEAR|SFTP|OPENSSL_EC|CURL|LANG_CN|USB|TTYD|MINIDLNA)' "$CFG" || true
+
+          # ---- 5. squashfs 块大小 ----
+          grep -q 'mksquashfs .*-b 524288' $T/vendors/Ralink/MT7621/Makefile \
+            || { echo "::error::MT7621 Makefile 未设置 mksquashfs -b 524288, 体积会超标"; exit 1; }
+          echo "squashfs 块大小: $SQUASHFS_BLOCK"
+          echo "编译前校验全部通过"
+
+      - name: 编译固件 K2P
+        run: |
+          set -euo pipefail
+          cd /opt/rt-n56u/trunk
+          fakeroot ./build_firmware_modify "$DEVICE" 2>&1 | tee /tmp/build.log
+
+      - name: 产物校验（体积 / 三个组件是否真的进了 squashfs）
+        run: |
+          set -euo pipefail
+          cd /opt/rt-n56u/trunk
+          ls -l images/
+
+          echo "===== romfs 侧 ====="
+          ls -l romfs/usr/bin/mihomo romfs/usr/bin/mihomo-start romfs/usr/bin/easytier-core
+          ls -l romfs/usr/share/mihomo/ui/index.html
+          R_MH=$(stat -c%s romfs/usr/bin/mihomo)
+          R_ET=$(stat -c%s romfs/usr/bin/easytier-core)
+          echo "romfs: mihomo=$R_MH easytier=$R_ET"
+          [ "$R_MH" -eq "$MIHOMO_SIZE" ]     || { echo "::error::romfs mihomo 大小异常 $R_MH"; exit 1; }
+          [ "$R_ET" -eq "$EASYTIER_SIZE" ]   || { echo "::error::romfs easytier 大小异常 $R_ET"; exit 1; }
+          test -x romfs/usr/bin/mihomo        || { echo "::error::romfs mihomo 不可执行"; exit 1; }
+          test -x romfs/usr/bin/easytier-core || { echo "::error::romfs easytier-core 不可执行"; exit 1; }
+          test -f romfs/usr/share/mihomo/ui/index.html || { echo "::error::romfs 缺 yacd index.html"; exit 1; }
+
+          echo "===== squashfs 侧 ====="
+          ROOTFS=$(stat -c%s images/ramdisk)
+          echo "rootfs(images/ramdisk, squashfs-xz, -b $SQUASHFS_BLOCK): $ROOTFS 字节 ($(awk "BEGIN{printf \"%.2f\", $ROOTFS/1048576}") MiB)"
+
+          UNSQ=""
+          for c in ./tools/mksquashfs_xz/unsquashfs "$(command -v unsquashfs || true)" ; do
+            if [ -n "$c" ] && [ -x "$c" ]; then UNSQ="$c"; break; fi
+          done
+          if [ -n "$UNSQ" ]; then
+            echo "使用 $UNSQ 抽查 squashfs"
+            "$UNSQ" -ll images/ramdisk > /tmp/sq.txt 2>/dev/null || "$UNSQ" -l images/ramdisk > /tmp/sq.txt
+            for f in usr/bin/mihomo usr/bin/mihomo-start usr/bin/easytier-core usr/share/mihomo/ui/index.html ; do
+              grep -qE "$f\$" /tmp/sq.txt || { echo "::error::squashfs 内找不到 /$f"; exit 1; }
+              echo "  OK  /$f"
+            done
+            SQ_MH=$(awk '/ usr\/bin\/mihomo$/ {print $3}' /tmp/sq.txt | head -1)
+            SQ_ET=$(awk '/ usr\/bin\/easytier-core$/ {print $3}' /tmp/sq.txt | head -1)
+            echo "squashfs 内 mihomo=$SQ_MH  easytier=$SQ_ET"
+            [ "$SQ_MH" -eq "$MIHOMO_SIZE" ]   || { echo "::error::squashfs mihomo 大小异常 $SQ_MH"; exit 1; }
+            [ "$SQ_ET" -eq "$EASYTIER_SIZE" ] || { echo "::error::squashfs easytier 大小异常 $SQ_ET"; exit 1; }
+            echo "squashfs 内 yacd 条目数: $(grep -c 'usr/share/mihomo/ui/' /tmp/sq.txt)"
+          else
+            echo "::warning::没有可用的 unsquashfs，跳过 squashfs 抽查"
+          fi
+
+          echo "===== 单组件压缩占用（同块大小实测）====="
+          MK=./tools/mksquashfs_xz/mksquashfs
+          MH_SQ=0; ET_SQ=0; UI_SQ=0
+          if [ -x "$MK" ]; then
+            rm -rf /tmp/sqbase && mkdir -p /tmp/sqbase/usr/bin
+            rm -f /tmp/sq_base.sq /tmp/sq_one.sq /tmp/sq_ui.sq
+            "$MK" /tmp/sqbase /tmp/sq_base.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+            BASE=$(stat -c%s /tmp/sq_base.sq)
+            for pair in "romfs/usr/bin/mihomo:MH" "romfs/usr/bin/easytier-core:ET" ; do
+              src=${pair%%:*}; tag=${pair##*:}
+              cp -f "$src" /tmp/sqbase/usr/bin/
+              rm -f /tmp/sq_one.sq
+              "$MK" /tmp/sqbase /tmp/sq_one.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+              V=$(( $(stat -c%s /tmp/sq_one.sq) - BASE ))
+              rm -f /tmp/sqbase/usr/bin/$(basename "$src")
+              if [ "$tag" = "MH" ]; then MH_SQ=$V; else ET_SQ=$V; fi
+            done
+            mkdir -p /tmp/sqbase/usr/share/mihomo
+            cp -a romfs/usr/share/mihomo/ui /tmp/sqbase/usr/share/mihomo/
+            rm -f /tmp/sq_ui.sq
+            "$MK" /tmp/sqbase /tmp/sq_ui.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+            UI_SQ=$(( $(stat -c%s /tmp/sq_ui.sq) - BASE ))
+            echo "mihomo        : $MIHOMO_SIZE -> $MH_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $MH_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$MH_SQ/$MIHOMO_SIZE}")%)"
+            echo "easytier-core : $EASYTIER_SIZE -> $ET_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $ET_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$ET_SQ/$EASYTIER_SIZE}")%)"
+            echo "yacd ui       : $YACD_UI_BYTES -> $UI_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $UI_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$UI_SQ/$YACD_UI_BYTES}")%)"
+            echo "三者合计占用  : $((MH_SQ + ET_SQ + UI_SQ)) 字节 ($(awk "BEGIN{printf \"%.3f\", ($MH_SQ+$ET_SQ+$UI_SQ)/1048576}") MiB)"
+          else
+            echo "::warning::找不到 mksquashfs，跳过分项占用统计"
+          fi
+
+          echo "===== 最终固件 ====="
+          TRX=$(ls images/*.trx | head -1)
+          SIZE=$(stat -c%s "$TRX")
+          MARGIN=$((MAX_TRX_SIZE - SIZE))
+          PARTLEFT=$((PART_SIZE - SIZE))
+          echo "TRX: $TRX"
+          echo "TRX 字节数:   $SIZE"
+          echo "TRX 体积:     $(awk "BEGIN{printf \"%.3f\", $SIZE/1048576}") MiB"
+          echo "自限上限:     $MAX_TRX_SIZE 字节 (15.0 MiB)"
+          echo "距自限余量:   $MARGIN 字节 ($(awk "BEGIN{printf \"%.3f\", $MARGIN/1048576}") MiB)"
+          echo "分区剩余空间: $PARTLEFT 字节 ($(awk "BEGIN{printf \"%.3f\", $PARTLEFT/1048576}") MiB, 分区共 $PART_SIZE)"
+          {
+            echo "| 项目 | 字节 | MiB |"
+            echo "|---|---|---|"
+            echo "| rootfs (squashfs xz, -b $SQUASHFS_BLOCK) | $ROOTFS | $(awk "BEGIN{printf \"%.3f\", $ROOTFS/1048576}") |"
+            echo "| mihomo 进 squashfs | $MH_SQ | $(awk "BEGIN{printf \"%.3f\", $MH_SQ/1048576}") |"
+            echo "| easytier-core 进 squashfs | $ET_SQ | $(awk "BEGIN{printf \"%.3f\", $ET_SQ/1048576}") |"
+            echo "| yacd ui 进 squashfs | $UI_SQ | $(awk "BEGIN{printf \"%.3f\", $UI_SQ/1048576}") |"
+            echo "| **trx 合计** | **$SIZE** | **$(awk "BEGIN{printf \"%.3f\", $SIZE/1048576}")** |"
+            echo "| 自限 15.0 MiB | $MAX_TRX_SIZE | 15.000 |"
+            echo "| 分区 15.375 MiB | $PART_SIZE | 15.375 |"
+            echo "| 距自限余量 | $MARGIN | $(awk "BEGIN{printf \"%.3f\", $MARGIN/1048576}") |"
+          } | tee size-report.md
+
+          cp -f "$TRX" /opt/images/K2P.trx
+          cp -f size-report.md /opt/images/size-report.md
+          cd /opt/images && md5sum K2P.trx | tee md5sum.txt
+
+          if [ "$SIZE" -gt "$MAX_TRX_SIZE" ]; then
+            echo "::error::固件体积超限 $SIZE > $MAX_TRX_SIZE (15.0 MiB)，装不下，需要继续砍基座"
+            exit 1
+          fi
+          echo "体积校验通过：$SIZE <= $MAX_TRX_SIZE"
+
+      - name: 上传 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: K2P-mihomo-${{ github.sha }}
+          path: |
+            /opt/images/K2P.trx
+            /opt/images/md5sum.txt
+            /opt/images/size-report.md
+          if-no-files-found: warn
+
+      - name: 上传到 Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: K2P-mihomo-1
+          name: K2P mihomo 固件 v1（体积验证版）
+          body: |
+            斐讯 K2P A1/A2（MT7621A + MT7615D，16MB NOR / 128MB RAM）Padavan 固件，
+            内置 **未压缩** mihomo（30,802,086 B）、easytier-lite v0.2.0（6,698,364 B）
+            与 yacd 面板静态资源（/usr/share/mihomo/ui）。
+
+            - 模板：`trunk/configs/templates/K2P_nano.config`
+            - squashfs 块 512 KiB（xz），Go 静态二进制压缩率明显改善
+            - 源码 commit: ${{ github.sha }}
+            - 刷机：Breed → 固件更新 → 选本 trx；**只适用于 MT7621 的 A1/A2，B1 是博通芯片不能刷**
+            - mihomo 部署：启动脚本加 `/usr/bin/mihomo-start &`，
+              订阅地址写 `/etc/storage/mihomo/sub_url.txt`，
+              面板 `http://<路由器IP>:9090/ui/`
+          files: |
+            /opt/images/K2P.trx
+            /opt/images/md5sum.txt
+            /opt/images/size-report.md
+          fail_on_unmatched_files: true
+
+      - name: 失败时输出日志尾部
+        if: failure()
+        run: |
+          echo "===== build.log (tail 200) ====="
+          tail -200 /tmp/build.log 2>/dev/null || echo "无 build.log"

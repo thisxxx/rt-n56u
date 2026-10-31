@@ -24,6 +24,12 @@ romfs:
 	# -p +x: 显式补上可执行权限
 	$(ROMFSINST) -S -p +x $(THISDIR)/mihomo /usr/bin/mihomo
 	$(ROMFSINST) -S -p +x $(THISDIR)/mihomo-start /usr/bin/mihomo-start
+	# yacd 面板静态资源 (45 个文件, 1,135,385 B 原始 / squashfs 内约 0.40 MiB)
+	# 【不要打成 tar.gz】: squashfs 自己就是 xz 分块压缩, 再套一层压缩会让
+	# xz 失去跨文件压缩上下文, 压缩率反而变差, 白占约 0.5 MiB。
+	# romfs-inst.sh 支持目录源: src 是目录时递归 cpio 进 $(ROMFSDIR)$(dst)
+	# (-d 只用于确保 dst 的父目录存在)
+	$(ROMFSINST) -d -S $(THISDIR)/ui /usr/share/mihomo/ui
 
 clean:
 	@true
