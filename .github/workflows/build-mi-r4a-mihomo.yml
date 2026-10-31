@@ -27,6 +27,10 @@ env:
   MAX_TRX_SIZE: 15204352
   # 未压缩 mihomo 的精确字节数
   MIHOMO_SIZE: 30802086
+  # 未压缩 easytier-lite 的精确字节数 (lite-v0.2.0-20261031-e89ca8a, upx -d 解压后)
+  EASYTIER_SIZE: 6698364
+  # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
+  SQUASHFS_BLOCK: 524288
 
 jobs:
   build:
@@ -114,13 +118,39 @@ jobs:
           grep -q 'CONFIG_FIRMWARE_INCLUDE_EASYTIER.*+= easytier' \
                /opt/rt-n56u/trunk/user/Makefile \
                || { echo "::error::trunk/user/Makefile 未注册 easytier 模块"; exit 1; }
-          grep -q 'CONFIG_FIRMWARE_INCLUDE_EASYTIER is not set' \
+          grep -q '^CONFIG_FIRMWARE_INCLUDE_EASYTIER=y' \
                /opt/rt-n56u/trunk/configs/templates/MI-R4A.config \
-               || echo "::warning::模板里 CONFIG_FIRMWARE_INCLUDE_EASYTIER 不是关闭状态, 确认二进制已就位"
+               || { echo "::error::MI-R4A.config 未开启 CONFIG_FIRMWARE_INCLUDE_EASYTIER"; exit 1; }
           test -f /opt/rt-n56u/trunk/user/mihomo/mihomo-start \
                || { echo "::error::mihomo-start 启动脚本缺失"; exit 1; }
           test -d /opt/rt-n56u/trunk/user/easytier \
                || { echo "::error::easytier 模块目录缺失"; exit 1; }
+
+          # ---- easytier 二进制校验 ----
+          ETBIN=/opt/rt-n56u/trunk/user/easytier/easytier-core
+          test -f "$ETBIN" || { echo "::error::easytier 二进制缺失: $ETBIN"; exit 1; }
+          ETSIZE=$(stat -c%s "$ETBIN")
+          echo "easytier 二进制大小: $ETSIZE 字节 (期望 $EASYTIER_SIZE)"
+          [ "$ETSIZE" -eq "$EASYTIER_SIZE" ] || {
+            echo "::error::easytier 二进制大小异常(应为 $EASYTIER_SIZE): $ETSIZE"
+            echo "::error::若为 1769144 字节说明放的是 UPX 版, 请换回未压缩原始二进制"
+            exit 1; }
+          ETMAGIC=$(od -An -tx1 -N20 "$ETBIN" | tr -d ' \n')
+          echo "easytier ELF 头: $ETMAGIC"
+          case "$ETMAGIC" in
+            7f454c4601*0002000800*) echo "easytier ELF 头校验通过 (ELF32 / MIPS / 小端)" ;;
+            *) echo "::error::easytier-core 不是 MIPS 32 位小端可执行文件"; exit 1 ;;
+          esac
+          if grep -aq "/lib/ld-uClibc\|/lib/ld-musl\|/lib/ld.so" "$ETBIN"; then
+            echo "::error::easytier-core 疑似动态链接, 需要全静态二进制"; exit 1
+          fi
+          echo "easytier 静态链接检查通过"
+
+          # ---- squashfs 块大小校验 (体积达标的关键) ----
+          grep -q 'mksquashfs .*-b 524288' \
+               /opt/rt-n56u/trunk/vendors/Ralink/MT7621/Makefile \
+               || { echo "::error::MT7621.mak 未设置 mksquashfs -b 524288, 固件会超限"; exit 1; }
+          echo "squashfs 块大小: $SQUASHFS_BLOCK 字节"
           echo "编译前校验全部通过"
 
       - name: 编译固件 MI-R4A
@@ -136,11 +166,17 @@ jobs:
           ls -l images/
 
           echo "===== romfs 侧 ====="
-          ls -l romfs/usr/bin/mihomo romfs/usr/bin/mihomo-start
+          ls -l romfs/usr/bin/mihomo romfs/usr/bin/mihomo-start romfs/usr/bin/easytier-core
           ROMFS_MIHOMO=$(stat -c%s romfs/usr/bin/mihomo)
           echo "romfs 内 mihomo: $ROMFS_MIHOMO 字节"
           [ "$ROMFS_MIHOMO" -eq "$MIHOMO_SIZE" ] || {
             echo "::error::romfs 里的 mihomo 大小异常: $ROMFS_MIHOMO (期望 $MIHOMO_SIZE)"; exit 1; }
+          test -f romfs/usr/bin/easytier-core || { echo "::error::romfs 内缺 /usr/bin/easytier-core"; exit 1; }
+          ROMFS_ET=$(stat -c%s romfs/usr/bin/easytier-core)
+          echo "romfs 内 easytier-core: $ROMFS_ET 字节"
+          [ "$ROMFS_ET" -eq "$EASYTIER_SIZE" ] || {
+            echo "::error::romfs 里的 easytier-core 大小异常: $ROMFS_ET (期望 $EASYTIER_SIZE)"; exit 1; }
+          test -x romfs/usr/bin/easytier-core || { echo "::error::romfs 内 easytier-core 不可执行"; exit 1; }
 
           echo "===== squashfs 侧 ====="
           ROOTFS=$(stat -c%s images/ramdisk)
@@ -159,9 +195,35 @@ jobs:
             [ "$SQ_SIZE" -eq "$MIHOMO_SIZE" ] || {
               echo "::error::squashfs 里的 mihomo 大小异常: $SQ_SIZE (期望 $MIHOMO_SIZE)"; exit 1; }
             grep -E 'usr/bin/mihomo-start$' /tmp/sq.txt || { echo "::error::squashfs 内找不到 /usr/bin/mihomo-start"; exit 1; }
-            echo "squashfs 抽查通过: mihomo 已完整进只读区"
+            grep -E 'usr/bin/easytier-core$' /tmp/sq.txt || { echo "::error::squashfs 内找不到 /usr/bin/easytier-core"; exit 1; }
+            SQ_ET=$(awk '/usr\/bin\/easytier-core$/ {print $3}' /tmp/sq.txt | head -1)
+            echo "squashfs 内 /usr/bin/easytier-core 大小: ${SQ_ET} 字节"
+            [ "$SQ_ET" -eq "$EASYTIER_SIZE" ] || {
+              echo "::error::squashfs 里的 easytier-core 大小异常: $SQ_ET (期望 $EASYTIER_SIZE)"; exit 1; }
+            echo "squashfs 抽查通过: mihomo + easytier-core 均已完整进只读区"
           else
             echo "::warning::没有可用的 unsquashfs，跳过 squashfs 抽查（romfs 检查已通过）"
+          fi
+
+          # 各自在 squashfs 里的压缩占用：用同样的块大小单独打包实测增量
+          echo "===== 二进制 squashfs 压缩占用（同块大小实测）====="
+          MK=./tools/mksquashfs_xz/mksquashfs
+          if [ -x "$MK" ]; then
+            rm -rf /tmp/sqbase && mkdir -p /tmp/sqbase/usr/bin
+            "$MK" /tmp/sqbase /tmp/sq_base.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+            BASE=$(stat -c%s /tmp/sq_base.sq)
+            cp -f romfs/usr/bin/mihomo /tmp/sqbase/usr/bin/
+            "$MK" /tmp/sqbase /tmp/sq_min.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+            MH_SQ=$(( $(stat -c%s /tmp/sq_min.sq) - BASE ))
+            rm -f /tmp/sqbase/usr/bin/mihomo
+            cp -f romfs/usr/bin/easytier-core /tmp/sqbase/usr/bin/
+            "$MK" /tmp/sqbase /tmp/sq_et.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+            ET_SQ=$(( $(stat -c%s /tmp/sq_et.sq) - BASE ))
+            echo "mihomo        : $MIHOMO_SIZE -> $MH_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $MH_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$MH_SQ/$MIHOMO_SIZE}")%)"
+            echo "easytier-core : $EASYTIER_SIZE -> $ET_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $ET_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$ET_SQ/$EASYTIER_SIZE}")%)"
+            echo "两者合计占用  : $((MH_SQ + ET_SQ)) 字节 ($(awk "BEGIN{printf \"%.3f\", ($MH_SQ+$ET_SQ)/1048576}") MiB)"
+          else
+            echo "::warning::找不到 mksquashfs，跳过分项占用统计"
           fi
 
           echo "===== 最终固件 ====="
@@ -180,7 +242,9 @@ jobs:
           {
             echo "| 项目 | 字节 | MiB |"
             echo "|---|---|---|"
-            echo "| rootfs (squashfs) | $ROOTFS | $(awk "BEGIN{printf \"%.2f\", $ROOTFS/1048576}") |"
+            echo "| rootfs (squashfs, -b $SQUASHFS_BLOCK) | $ROOTFS | $(awk "BEGIN{printf \"%.2f\", $ROOTFS/1048576}") |"
+            echo "| mihomo 占用 | ${MH_SQ:-0} | $(awk "BEGIN{printf \"%.2f\", ${MH_SQ:-0}/1048576}") |"
+            echo "| easytier-core 占用 | ${ET_SQ:-0} | $(awk "BEGIN{printf \"%.2f\", ${ET_SQ:-0}/1048576}") |"
             echo "| trx 合计 | $SIZE | $(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}") |"
             echo "| 分区上限 | $MAX_TRX_SIZE | 14.50 |"
             echo "| 剩余余量 | $MARGIN | $(awk "BEGIN{printf \"%.2f\", $MARGIN/1048576}") |"
@@ -206,16 +270,15 @@ jobs:
           tag_name: MI-R4A-mihomo-${{ github.run_number }}
           name: MI-R4A mihomo 固件 build ${{ github.run_number }}
           body: |
-            小米 R4A 千兆版 (MI-R4A) 固件，内置 **未压缩** 的 mihomo
-            (mipsle softfloat 全静态二进制，30,802,086 字节，squashfs xz 压缩后约 5.99 MiB)。
+            小米 R4A 千兆版 (MI-R4A) 固件，内置 **未压缩** 的 mihomo 与 easytier-lite
+            (mipsle softfloat 全静态二进制；mihomo 30,802,086 字节、easytier-core 6,698,364 字节)。
 
-            为什么不用 UPX 版：squashfs 按需分页，只驻留被访问的代码页；
-            UPX 会在 exec 时把整个 29.38 MiB 解压到匿名内存，128MB 无 swap 的机器必 OOM。
-
+            - squashfs 块大小提高到 512KiB，Go 静态二进制压缩率明显改善
             - 源码 commit: ${{ github.sha }}
-            - 部署：刷入后在「系统管理 → 服务 → 启动脚本」加一行 `/usr/bin/mihomo-start &`，
+            - mihomo 部署：刷入后在「系统管理 → 服务 → 启动脚本」加一行 `/usr/bin/mihomo-start &`，
               再把订阅地址写进 `/etc/storage/mihomo/sub_url.txt`
-            - 详见仓库内 trunk/user/mihomo/mihomo-start 顶部注释
+            - easytier 部署：`/usr/bin/easytier-core -d --network-name <名字> --network-secret <密码> -p <对端地址>`
+            - 详见仓库内 trunk/user/mihomo/mihomo-start 与 trunk/user/easytier/README.md
           files: |
             /opt/images/MI-R4A.trx
             /opt/images/md5sum.txt
