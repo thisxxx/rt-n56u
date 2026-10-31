@@ -192,8 +192,14 @@ jobs:
             SQ_MH=$(awk '/ usr\/bin\/mihomo$/ {print $3}' /tmp/sq.txt | head -1)
             SQ_ET=$(awk '/ usr\/bin\/easytier-core$/ {print $3}' /tmp/sq.txt | head -1)
             echo "squashfs 内 mihomo=$SQ_MH  easytier=$SQ_ET"
-            [ "$SQ_MH" -eq "$MIHOMO_SIZE" ]   || { echo "::error::squashfs mihomo 大小异常 $SQ_MH"; exit 1; }
-            [ "$SQ_ET" -eq "$EASYTIER_SIZE" ] || { echo "::error::squashfs easytier 大小异常 $SQ_ET"; exit 1; }
+            # unsquashfs -ll 在 Padavan 的 ramdisk 上会失败并回退到 -l，而 -l 只输出路径没有大小列，
+            # 此时 $3 为空。不要因此 fail — romfs 侧已逐字节校验过，文件存在性上面也验过。
+            if [ -n "$SQ_MH" ] && [ -n "$SQ_ET" ]; then
+              [ "$SQ_MH" -eq "$MIHOMO_SIZE" ]   || { echo "::error::squashfs mihomo 大小异常 $SQ_MH != $MIHOMO_SIZE"; exit 1; }
+              [ "$SQ_ET" -eq "$EASYTIER_SIZE" ] || { echo "::error::squashfs easytier 大小异常 $SQ_ET != $EASYTIER_SIZE"; exit 1; }
+            else
+              echo "::warning::unsquashfs 输出不含大小列（-l 模式），跳过 squashfs 内大小比对；romfs 侧已校验 mihomo=$MIHOMO_SIZE easytier=$EASYTIER_SIZE"
+            fi
             echo "squashfs 内 yacd 条目数: $(grep -c 'usr/share/mihomo/ui/' /tmp/sq.txt)"
           else
             echo "::warning::没有可用的 unsquashfs，跳过 squashfs 抽查"
