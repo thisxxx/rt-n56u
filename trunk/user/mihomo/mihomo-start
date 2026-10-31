@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# mihomo 启动包装脚本 (Padavan / 小米 R4A 千兆版 专用)
+#
+# 用法:
+#   在 Web 界面「系统管理 -> 服务 -> 启动脚本(started_script.sh)」中加入一行:
+#       /usr/bin/mihomo-start &
+#
+# 约定路径:
+#   配置目录: /etc/storage/mihomo/        (storage 分区仅 512 KiB, 注意配置体积)
+#   配置文件: /etc/storage/mihomo/config.yaml
+#   运行日志: /tmp/mihomo.log             (/tmp 为内存盘, 重启清空)
+#
+# 注意:
+#   本脚本只负责拉起 mihomo 进程, 不负责下发 TPROXY/REDIRECT 防火墙规则。
+#   内核已内置 xt_TPROXY.ko / xt_socket.ko / ipt_REDIRECT.ko,
+#   透明代理所需的 iptables 规则请自行在 started_script.sh 中一并添加,
+#   或在 config.yaml 中启用 tproxy-port 后自行维护规则。
+#
+
+MIHOMO_BIN=/usr/bin/mihomo
+MIHOMO_DIR=/etc/storage/mihomo
+MIHOMO_CFG=$MIHOMO_DIR/config.yaml
+MIHOMO_LOG=/tmp/mihomo.log
+
+if [ ! -x "$MIHOMO_BIN" ] ; then
+	echo "mihomo: 二进制不存在: $MIHOMO_BIN" >&2
+	exit 1
+fi
+
+if [ ! -f "$MIHOMO_CFG" ] ; then
+	echo "mihomo: 配置不存在: $MIHOMO_CFG" >&2
+	echo "mihomo: 请先上传 config.yaml 到该目录 (Web 文件管理 / scp 均可)" >&2
+	exit 1
+fi
+
+# 防重复启动
+RUNNING=`pidof mihomo`
+if [ -n "$RUNNING" ] ; then
+	echo "mihomo: 已在运行 (pid $RUNNING)"
+	exit 0
+fi
+
+cd "$MIHOMO_DIR" || exit 1
+
+nohup "$MIHOMO_BIN" -d "$MIHOMO_DIR" -f "$MIHOMO_CFG" >"$MIHOMO_LOG" 2>&1 &
+echo "mihomo: 已启动, 日志: $MIHOMO_LOG"

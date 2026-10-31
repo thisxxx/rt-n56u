@@ -1,0 +1,155 @@
+name: Build MI-R4A (mihomo)
+
+# 仅构建 小米 R4A 千兆版 (MI-R4A / MT7621A / 16MB NOR / 128MB RAM) 单一固件，
+# 使用 trunk/configs/templates/MI-R4A.config（已开启 CONFIG_FIRMWARE_INCLUDE_MIHOMO=y）。
+#
+# 说明：runner 固定 ubuntu-22.04 而非 ubuntu-latest。
+#       Padavan 是 2016 年前后的老构建系统，ubuntu-latest(24.04) 上
+#       libncurses5-dev / lib32z1 等依赖包已不存在，apt 直接失败。
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  toolchain_pkg: mipsel-linux-uclibc.tar.xz
+  toolchain_url: https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1
+  # 14.50 MiB 分区上限
+  MAX_TRX_SIZE: 15204352
+
+jobs:
+  build:
+    name: build MI-R4A
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget cpio rsync unzip p7zip-full fakeroot \
+            build-essential gcc-multilib g++-multilib \
+            zlib1g-dev libmpc-dev libgmp-dev libmpfr-dev \
+            gawk flex bison texinfo help2man libtool-bin libltdl-dev \
+            gperf gettext autopoint pkg-config python3-docutils \
+            libncurses5-dev libncursesw5-dev u-boot-tools squashfs-tools \
+            subversion cvs swig nodejs
+          # 32 位运行库：部分预编译工具链需要，缺失不致命
+          sudo apt-get install -y --no-install-recommends lib32z1 lib32stdc++6 || true
+
+      - name: 准备 /opt/rt-n56u 与交叉工具链
+        run: |
+          set -e
+          sudo mkdir -p /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x /opt/images
+          # Padavan 构建脚本硬编码 /opt/rt-n56u 路径，按上游 CI 的方式搬移源码
+          sudo rsync -a --exclude '.git' ./ /opt/rt-n56u/
+          sudo chown -R "$(id -u):$(id -g)" /opt/rt-n56u /opt/images
+          curl -L --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/$toolchain_pkg" \
+               "$toolchain_url/$toolchain_pkg"
+          sudo tar -xf "$RUNNER_TEMP/$toolchain_pkg" \
+               -C /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x
+          ls /opt/rt-n56u/toolchain-mipsel/toolchain-3.4.x/bin | head -5
+          rm -f "$RUNNER_TEMP/$toolchain_pkg"
+
+      - name: 编译前校验（mihomo 是否就位）
+        run: |
+          set -e
+          BIN=/opt/rt-n56u/trunk/user/mihomo/mihomo-linux-mipsle-softfloat
+          test -f "$BIN" || { echo "::error::mihomo 二进制缺失: $BIN"; exit 1; }
+          SIZE=$(stat -c%s "$BIN")
+          echo "mihomo 二进制大小: $SIZE 字节"
+          [ "$SIZE" -eq 6331540 ] || { echo "::error::mihomo 二进制大小异常(应为 6331540): $SIZE"; exit 1; }
+          # ELF32 LSB MIPS EXEC 检查
+          MAGIC=$(od -An -tx1 -N20 "$BIN" | tr -d ' \n')
+          echo "ELF 头: $MAGIC"
+          case "$MAGIC" in
+            7f454c4601*0002000800*) echo "ELF 头校验通过 (ELF32 / MIPS / EXEC)" ;;
+            *) echo "::error::mihomo 不是 MIPS 32 位小端可执行文件"; exit 1 ;;
+          esac
+          grep -q '^CONFIG_FIRMWARE_INCLUDE_MIHOMO=y' \
+               /opt/rt-n56u/trunk/configs/templates/MI-R4A.config \
+               || { echo "::error::MI-R4A.config 未开启 CONFIG_FIRMWARE_INCLUDE_MIHOMO"; exit 1; }
+          grep -q 'CONFIG_FIRMWARE_INCLUDE_MIHOMO.*+= mihomo' \
+               /opt/rt-n56u/trunk/user/Makefile \
+               || { echo "::error::trunk/user/Makefile 未注册 mihomo 模块"; exit 1; }
+          test -f /opt/rt-n56u/trunk/user/mihomo/mihomo-start \
+               || { echo "::error::mihomo-start 启动脚本缺失"; exit 1; }
+          echo "编译前校验全部通过"
+
+      - name: 编译固件 MI-R4A
+        run: |
+          set -euo pipefail
+          cd /opt/rt-n56u/trunk
+          fakeroot ./build_firmware_modify MI-R4A 2>&1 | tee /tmp/build.log
+
+      - name: 产物校验（体积 / mihomo 是否在 rootfs 内）
+        run: |
+          set -euo pipefail
+          cd /opt/rt-n56u/trunk
+          ls -l images/
+          ls -l romfs/usr/bin/mihomo romfs/usr/bin/mihomo-start
+
+          TRX=$(ls images/*.trx | head -1)
+          SIZE=$(stat -c%s "$TRX")
+          echo "TRX: $TRX"
+          echo "TRX 大小: $SIZE 字节 ($(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}") MiB)"
+          echo "分区上限: $MAX_TRX_SIZE 字节 (14.50 MiB)"
+          if [ "$SIZE" -gt "$MAX_TRX_SIZE" ]; then
+            echo "::error::固件体积超限，无法刷入 16MB NOR 的 R4A"
+            exit 1
+          fi
+
+          # 从 squashfs 镜像中反查，确认 mihomo 真的进了只读区
+          if unsquashfs -l images/ramdisk 2>/dev/null | grep -q 'usr/bin/mihomo$' ; then
+            echo "squashfs 内含 /usr/bin/mihomo"
+          else
+            echo "::warning::unsquashfs 未能列出 mihomo（romfs 检查已通过，仅供参考）"
+          fi
+
+          cp -f "$TRX" /opt/images/MI-R4A.trx
+          cd /opt/images && md5sum MI-R4A.trx | tee md5sum.txt
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MI-R4A-mihomo-${{ github.sha }}
+          path: |
+            /opt/images/MI-R4A.trx
+            /opt/images/md5sum.txt
+          if-no-files-found: error
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: MI-R4A-mihomo-${{ github.run_number }}
+          name: MI-R4A mihomo 固件 build ${{ github.run_number }}
+          body: |
+            小米 R4A 千兆版 (MI-R4A) 固件，内置 mihomo (UPX 压缩 mipsle softfloat 静态二进制)。
+            - 源码 commit: ${{ github.sha }}
+            - 使用方式：刷入后在「系统管理 → 服务 → 启动脚本」加入 `/usr/bin/mihomo-start &`，
+              并把配置放到 `/etc/storage/mihomo/config.yaml`
+          files: |
+            /opt/images/MI-R4A.trx
+            /opt/images/md5sum.txt
+          fail_on_unmatched_files: true
+
+      - name: 失败时输出日志尾部
+        if: failure()
+        run: |
+          echo "===== build.log (tail 200) ====="
+          tail -200 /tmp/build.log 2>/dev/null || echo "无 build.log"
