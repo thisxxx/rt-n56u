@@ -431,13 +431,24 @@ jobs:
             /opt/images/size-report.md
           if-no-files-found: warn
 
+      - name: 生成发布版本号
+        id: ver
+        run: |
+          # 每次构建一个独立版本 (日期 + 短 sha), 不覆盖历史 release:
+          # 同一天同一 commit 重跑会落到同一 tag, 视为同版本重建。
+          VER="$(date +%Y%m%d)-${GITHUB_SHA:0:7}"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=K2P-mihomo-${{ inputs.variant || 'full' }}-et${ET_VER}-$VER" >> "$GITHUB_OUTPUT"
+
       - name: 上传到 Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: K2P-mihomo-${{ inputs.variant || 'full' }}-et${{ env.ET_VER }}
-          name: K2P 固件（内置mihomo ${{ inputs.variant || 'full' }} + easytier v${{ env.ET_VER }}）
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: K2P 固件（内置mihomo ${{ inputs.variant || 'full' }} + easytier v${{ env.ET_VER }}）${{ steps.ver.outputs.ver }}
           body: |
+            构建版本 **${{ steps.ver.outputs.ver }}**（每次构建独立 tag，不覆盖历史发布）
+
             斐讯 K2P A1/A2（MT7621A + MT7615D，16MB NOR / 128MB RAM）Padavan 固件，
             内置 **未压缩** mihomo、easytier-lite **v${{ env.ET_VER }}** 与 yacd 面板静态资源（/usr/share/mihomo/ui）。
             各组件 raw 字节与 sha256 见 size-report.md（随本 release 一同发布）。
