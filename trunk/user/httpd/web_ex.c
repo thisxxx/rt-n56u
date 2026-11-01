@@ -2626,28 +2626,56 @@ mihomo_panel_url_hook(int eid, webs_t wp, int argc, char **argv)
 	return 0;
 }
 
-/* 订阅精简开关 (nvram mh_slim) 与 slim.conf 里的 SLIM=1 是否不一致。
- * 两个入口写的是同一件事, 面板改了要把文件同步过去, 命令行改了要同步 nvram。
- * 返回 1 表示需要执行 slim on/off 对齐, 调用方同时要重建配置。 */
+/* 读 slim.conf 这种 KEY=VALUE 文件里的一个整数值, 键不存在返回 def */
 static int
-mihomo_slim_changed(void)
+mihomo_conf_int(const char *path, const char *key, int def)
 {
 	FILE *fp;
 	char line[128];
-	int in_file = 0;
+	int n = strlen(key);
 
-	if (!f_exists(MH_SLIM_CONF))
-		in_file = 0;
-	else if ((fp = fopen(MH_SLIM_CONF, "r")) != NULL) {
-		while (fgets(line, sizeof(line), fp)) {
-			if (!strncmp(line, "SLIM=1", 6)) {
-				in_file = 1;
-				break;
-			}
+	fp = fopen(path, "r");
+	if (!fp)
+		return def;
+	while (fgets(line, sizeof(line), fp)) {
+		if (!strncmp(line, key, n) && line[n] == '=') {
+			fclose(fp);
+			return atoi(line + n + 1);
 		}
-		fclose(fp);
 	}
-	return in_file != (nvram_get_int("mh_slim") == 1);
+	fclose(fp);
+	return def;
+}
+
+/* nvram 里的参数: 空串当"没设过", 返回默认值而不是 0 */
+static int
+mihomo_nvram_int(const char *key, int def)
+{
+	const char *v = nvram_safe_get(key);
+
+	return (v && *v) ? atoi(v) : def;
+}
+
+/* 面板上的开关/参数 与 slim.conf 里的快照是否不一致。
+ * 一致返回 0; 不一致返回 1, 调用方执行 slim on 重写快照 + 重建配置。 */
+static int
+mihomo_slim_changed(void)
+{
+	int on_nv, on_file;
+
+	on_nv = (nvram_get_int("mh_slim") == 1);
+	on_file = mihomo_conf_int(MH_SLIM_CONF, "SLIM", 0) == 1;
+
+	if (on_nv != on_file)
+		return 1;
+	if (!on_nv)			/* 两边都关, 没有参数可比 */
+		return 0;
+
+	return mihomo_conf_int(MH_SLIM_CONF, "SLIM_DEDUP", 1)            != mihomo_nvram_int("mh_slim_dedup", 1)
+	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_CUT_AFTER_MATCH", 1)  != mihomo_nvram_int("mh_slim_cut", 1)
+	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_DISABLE_SNIFFER", 1)  != mihomo_nvram_int("mh_slim_sniff", 1)
+	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_DNS_MAX", 3)          != mihomo_nvram_int("mh_slim_dnsmax", 3)
+	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_GEO_AUTOUPDATE", 0)   != mihomo_nvram_int("mh_slim_geoupd", 0);
 }
 
 /* fake-ip 开关 (nvram mh_fakeip) 与 /tmp 里现行配置的 enhanced-mode 是否不一致。

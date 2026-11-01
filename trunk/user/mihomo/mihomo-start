@@ -29,6 +29,9 @@
 #                                           (Web 界面的 mh_sub_url 优先于本文件)
 #
 # 2. 订阅精简开关 (可选, 默认关闭):
+#      推荐在 Web 界面「高级设置 -> Mihomo」用开关 + 下拉框控制参数;
+#      面板存 nvram (mh_slim / mh_slim_dedup / mh_slim_cut / mh_slim_sniff /
+#      mh_slim_dnsmax / mh_slim_geoupd), 再快照成下面的文件供本脚本读取。
 #      /etc/storage/mihomo/slim.conf        存在且 SLIM=1 时启用
 #      快捷命令: mihomo-start slim on|off|status
 #      可调项 (全部省略则用内置默认):
@@ -38,6 +41,8 @@
 #        SLIM_DISABLE_SNIFFER=1    关闭 sniffer (域名嗅探, 省 CPU 与内存)
 #        SLIM_DNS_MAX=3            nameserver 只保留前 N 条, 0=不动
 #        SLIM_GEO_AUTOUPDATE=0     关闭 geo-auto-update
+#      命令行 slim on 会用 nvram 里的参数 (没设过就用默认) 重写这份快照;
+#      手工改文件里的参数同样有效, 但要再跑一次 mihomo-start update。
 #      作用范围: 只动订阅回来的配置副本, 不改订阅源; 精简后仍走 mihomo -t 校验,
 #                校验不过会自动回滚到旧配置, 不会把路由器搞挂。
 #
@@ -119,6 +124,28 @@ count_rules() {
 	f && $0 != "" && $0 !~ /^[ \t]/ {f=0}
 	END {print n+0}
 	' "$1" 2>/dev/null
+}
+
+# 精简参数取值: nvram (面板上改的) > 调用方给的默认值
+slim_nv() {
+	_x=$(nvram get "$1" 2>/dev/null)
+	[ -n "$_x" ] && printf '%s' "$_x" || printf '%s' "$2"
+}
+
+# 把"当前生效参数"写成快照 slim.conf。面板改完参数后 httpd 会比对这份快照,
+# 不一致就重新执行 slim on + update, 所以这里的格式要和 httpd 的解析对齐。
+slim_write_conf() {
+	mkdir -p "$STOR"
+	{
+		echo '# 由 Web 面板 / mihomo-start slim on 生成: 总开关 + 参数快照'
+		echo '# 面板上改参数即可, 改完点"应用"; 手工改这里要再跑 mihomo-start update'
+		echo 'SLIM=1'
+		echo "SLIM_DEDUP=$(slim_nv mh_slim_dedup 1)"
+		echo "SLIM_CUT_AFTER_MATCH=$(slim_nv mh_slim_cut 1)"
+		echo "SLIM_DISABLE_SNIFFER=$(slim_nv mh_slim_sniff 1)"
+		echo "SLIM_DNS_MAX=$(slim_nv mh_slim_dnsmax 3)"
+		echo "SLIM_GEO_AUTOUPDATE=$(slim_nv mh_slim_geoupd 0)"
+	} > "$SLIM_CONF"
 }
 
 # ---------------------------------------------------------------------------
@@ -604,17 +631,7 @@ case "$1" in
 	slim)
 		case "$2" in
 			on)
-				mkdir -p "$STOR"
-				{
-					echo '# mihomo 订阅精简开关 (mihomo-start 读取; 删掉本文件即关闭)'
-					echo '# 改完执行 mihomo-start update 生效'
-					echo 'SLIM=1'
-					echo 'SLIM_DEDUP=1'
-					echo 'SLIM_CUT_AFTER_MATCH=1'
-					echo 'SLIM_DISABLE_SNIFFER=1'
-					echo 'SLIM_DNS_MAX=3'
-					echo 'SLIM_GEO_AUTOUPDATE=0'
-				} > "$SLIM_CONF"
+				slim_write_conf
 				# 同步面板开关, 两处状态保持一致
 				nvram set mh_slim=1
 				nvram commit >/dev/null 2>&1

@@ -969,6 +969,11 @@
 			{"mh_sub_url", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_fakeip", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_slim", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_slim_dedup", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_slim_cut", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_slim_sniff", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_slim_dnsmax", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_slim_geoupd", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_action", "", NULL, EVM_BLOCK_UNSAFE},
 			{0,0,0,0}
 		};

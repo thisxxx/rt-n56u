@@ -35,6 +35,7 @@ function initial(){
 	init_itoggle('mh_autostart');
 	init_itoggle('mh_fakeip');
 	init_itoggle('mh_slim');
+	slim_init();
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -113,6 +114,42 @@ function mihomo_apply_done(ok, msg){
 		setTimeout(function(){ location.reload(); }, 200);
 	else
 		alert(msg);
+}
+
+/* ================= 订阅精简参数 ================= */
+
+/* 与 mihomo-start 里的内置默认保持一致 */
+var SLIM_DEFAULT = { dedup: '1', cut: '1', sniff: '1', dnsmax: '3', geoupd: '0' };
+
+function slim_field(k){
+	return document.getElementById('sel_' + k);
+}
+
+/* nvram 里没存过就把控件显示成默认值 */
+function slim_init(){
+	var cur = {
+		dedup:  '<% nvram_get_x("","mh_slim_dedup"); %>',
+		cut:    '<% nvram_get_x("","mh_slim_cut"); %>',
+		sniff:  '<% nvram_get_x("","mh_slim_sniff"); %>',
+		dnsmax: '<% nvram_get_x("","mh_slim_dnsmax"); %>',
+		geoupd: '<% nvram_get_x("","mh_slim_geoupd"); %>'
+	};
+	for (var k in SLIM_DEFAULT){
+		var el = slim_field(k);
+		if (!el)
+			continue;
+		var v = trim_str(cur[k]);
+		el.value = (v === '') ? SLIM_DEFAULT[k] : v;
+	}
+}
+
+/* 只改控件, 要点“应用”才提交 */
+function slim_default(){
+	for (var k in SLIM_DEFAULT){
+		var el = slim_field(k);
+		if (el)
+			el.value = SLIM_DEFAULT[k];
+	}
 }
 
 function refresh_state(){
@@ -282,8 +319,35 @@ function open_panel(){
                                                 </div>
                                                 <span style="margin-left: 8px;"><% mihomo_slim_state(); %></span>
                                                 <div style="color: #999; margin-top: 4px;">
-                                                    开启后拉订阅时做针对性裁剪（规则去重、截断 MATCH 之后的死规则、关 sniffer、
-                                                    nameserver 只留前几条）。改动点“应用”会自动重建配置生效。
+                                                    开启后拉订阅时做针对性裁剪。改动点“应用”会自动重建配置生效。
+                                                </div>
+                                                <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #DDD; color: #555;">
+                                                    规则去重
+                                                    <select name="mh_slim_dedup" id="sel_dedup" class="input" style="width: 76px;">
+                                                        <option value="1">开</option><option value="0">关</option>
+                                                    </select>
+                                                    &nbsp;&nbsp;截断 MATCH 之后
+                                                    <select name="mh_slim_cut" id="sel_cut" class="input" style="width: 76px;">
+                                                        <option value="1">开</option><option value="0">关</option>
+                                                    </select>
+                                                    &nbsp;&nbsp;关 sniffer
+                                                    <select name="mh_slim_sniff" id="sel_sniff" class="input" style="width: 76px;">
+                                                        <option value="1">开</option><option value="0">关</option>
+                                                    </select>
+                                                    <br style="line-height: 8px;">
+                                                    nameserver 只留
+                                                    <select name="mh_slim_dnsmax" id="sel_dnsmax" class="input" style="width: 76px;">
+                                                        <option value="0">不限制</option><option value="1">1 条</option><option value="2">2 条</option><option value="3">3 条</option><option value="4">4 条</option><option value="5">5 条</option>
+                                                    </select>
+                                                    &nbsp;&nbsp;geo 自动更新
+                                                    <select name="mh_slim_geoupd" id="sel_geoupd" class="input" style="width: 76px;">
+                                                        <option value="0">关</option><option value="1">开</option>
+                                                    </select>
+                                                    &nbsp;&nbsp;
+                                                    <button class="btn btn-mini" type="button" onclick="slim_default();">恢复默认</button>
+                                                    <div style="color: #999; margin-top: 4px;">
+                                                        默认：去重开、截断开、关 sniffer、nameserver 留 3 条、geo 自动更新关。
+                                                    </div>
                                                 </div>
                                             </td>
                                         </tr>
