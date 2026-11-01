@@ -288,6 +288,8 @@ jobs:
       - name: 产物校验（体积 / 三个组件是否真的进了 squashfs）
         run: |
           set -euo pipefail
+          # 下面 geo 分项统计会引用 $T, 必须在这里定义 (set -u 下未定义会直接退出)
+          T=/opt/rt-n56u/trunk
           cd /opt/rt-n56u/trunk
           ls -l images/
 
