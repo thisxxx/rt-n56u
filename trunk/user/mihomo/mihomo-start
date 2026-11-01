@@ -350,6 +350,13 @@ do_fetch() {
 # 路由器自身流量走 OUTPUT 链不被接管 => mihomo / EasyTier 出站天然无环路
 # ---------------------------------------------------------------------------
 fw_start() {
+	# TPROXY 在内核里是 =m 模块 (K2P config), 不预加载则 mangle 规则报
+	# "No chain/target/match", 表现为 TCP 正常但 UDP 全失效, 非常隐蔽。
+	# modprobe 会自动先装依赖 nf_tproxy_core; 失败只警告, 不影响 TCP。
+	modprobe nf_tproxy_core 2>/dev/null
+	modprobe xt_TPROXY 2>/dev/null || \
+		log "警告: xt_TPROXY 模块加载失败, UDP 透明代理不可用 (TCP 不受影响)"
+
 	# 策略路由: 带标记的 UDP 包送回本机
 	ip rule del fwmark $MARK table $RT_TABLE 2>/dev/null
 	ip rule add fwmark $MARK table $RT_TABLE
