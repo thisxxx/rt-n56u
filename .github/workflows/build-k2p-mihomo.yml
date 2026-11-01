@@ -30,10 +30,14 @@ env:
   DEVICE: K2P_nano
   toolchain_pkg: mipsel-linux-uclibc.tar.xz
   toolchain_url: https://github.com/hanwckf/padavan-toolchain/releases/download/v1.1
-  # K2P firmware 分区: 0xa0000 起, 15.375 MiB = 16,121,856 B
+  # Padavan K2P 固件区实测 (trunk/linux-3.4.x/drivers/mtd/ralink/ralink-flash-map.h):
+  #   Bootloader 0x00000-0x30000 / Config 0x30000-0x40000 / Factory 0x40000-0x50000
+  #   Kernel 从 0x50000 起, 尾部 0x80000 (512K) 固定留给 /etc/storage
+  #   可用 = 0x1000000 - 0x50000 - 0x80000 = 0xF30000 = 15,925,248 B = 15.1875 MiB
+  # 注意: OpenWrt 的 firmware 分区是 0xa0000 起 0xf60000 长 (15.375 MiB), 两者不同, 别混用
   # 自限 15.0 MiB 留安全余量
   MAX_TRX_SIZE: 15728640
-  PART_SIZE: 16121856
+  PART_SIZE: 15925248
   # 未压缩 mihomo 的精确字节数
   MIHOMO_SIZE: 30802086
   # easytier 版本号 (仅用于命名与说明, 实际以 EASYTIER_URL 为准)
