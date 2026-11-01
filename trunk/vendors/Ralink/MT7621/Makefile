@@ -82,9 +82,10 @@ romfs.post::
 	rm -f $(RAMDISK)
 	rm -f $(KERNELZ).lzma
 ifeq ($(CONFIG_RT2880_ROOTFS_IN_FLASH),y)
-	# -b 524288: mksquashfs 默认 128K 块, 跨块不去重, Go 静态二进制(符号/字符串表)压缩率很差。
-	# 提到 512K 块后 mihomo 省 ~0.52MB、easytier 省 ~0.15MB, 内核 SQUASHFS_FILE_MAX_SIZE=1MB 允许。
-	$(ROOTDIR)/tools/mksquashfs_xz/mksquashfs $(ROMFSDIR) $(RAMDISK) -b 524288 -all-root -no-exports -noappend -nopad -noI -no-xattrs
+	# 块大小用 mksquashfs 默认 128K, 与官方 Padavan 完全一致。
+	# 曾用 -b 524288 省 ~0.67MB(内核 SQUASHFS_FILE_MAX_SIZE=1MB 理论上允许),
+	# 但 K2P 实机刷入后橙灯无法启动, 2026-11-01 回退排查, 待确认后再考虑恢复。
+	$(ROOTDIR)/tools/mksquashfs_xz/mksquashfs $(ROMFSDIR) $(RAMDISK) -all-root -no-exports -noappend -nopad -noI -no-xattrs
 endif
 
 image:
