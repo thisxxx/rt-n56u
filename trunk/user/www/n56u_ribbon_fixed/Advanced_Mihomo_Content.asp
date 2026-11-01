@@ -34,6 +34,7 @@ function initial(){
 	init_itoggle('mh_enable');
 	init_itoggle('mh_autostart');
 	init_itoggle('mh_fakeip');
+	init_itoggle('mh_slim');
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -268,12 +269,21 @@ function open_panel(){
                                         </tr>
 
                                         <tr>
-                                            <th>订阅精简<br><span style="font-weight: normal; color: #999;">mihomo-start slim</span></th>
+                                            <th>订阅精简<br><span style="font-weight: normal; color: #999;">默认关</span></th>
                                             <td>
-                                                <% mihomo_slim_state(); %>
+                                                <div class="main_itoggle">
+                                                    <div id="mh_slim_on_of">
+                                                        <input type="checkbox" id="mh_slim_fake" <% nvram_match_x("", "mh_slim", "1", "value=1 checked"); %><% nvram_match_x("", "mh_slim", "0", "value=0"); %>>
+                                                    </div>
+                                                </div>
+                                                <div style="position: absolute; margin-left: -10000px;">
+                                                    <input type="radio" value="1" name="mh_slim" id="mh_slim_1" <% nvram_match_x("", "mh_slim", "1", "checked"); %>><#checkbox_Yes#>
+                                                    <input type="radio" value="0" name="mh_slim" id="mh_slim_0" <% nvram_match_x("", "mh_slim", "0", "checked"); %>><#checkbox_No#>
+                                                </div>
+                                                <span style="margin-left: 8px;"><% mihomo_slim_state(); %></span>
                                                 <div style="color: #999; margin-top: 4px;">
-                                                    开启后会在拉取订阅后做针对性裁剪（规则去重、截断 MATCH 之后的死规则、
-                                                    关 sniffer、nameserver 只留前几条）。SSH 里用 <code>mihomo-start slim on|off|status</code> 切换。
+                                                    开启后拉订阅时做针对性裁剪（规则去重、截断 MATCH 之后的死规则、关 sniffer、
+                                                    nameserver 只留前几条）。改动点“应用”会自动重建配置生效。
                                                 </div>
                                             </td>
                                         </tr>

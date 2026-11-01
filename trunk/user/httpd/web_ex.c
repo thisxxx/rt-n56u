@@ -2626,6 +2626,30 @@ mihomo_panel_url_hook(int eid, webs_t wp, int argc, char **argv)
 	return 0;
 }
 
+/* 订阅精简开关 (nvram mh_slim) 与 slim.conf 里的 SLIM=1 是否不一致。
+ * 两个入口写的是同一件事, 面板改了要把文件同步过去, 命令行改了要同步 nvram。
+ * 返回 1 表示需要执行 slim on/off 对齐, 调用方同时要重建配置。 */
+static int
+mihomo_slim_changed(void)
+{
+	FILE *fp;
+	char line[128];
+	int in_file = 0;
+
+	if (!f_exists(MH_SLIM_CONF))
+		in_file = 0;
+	else if ((fp = fopen(MH_SLIM_CONF, "r")) != NULL) {
+		while (fgets(line, sizeof(line), fp)) {
+			if (!strncmp(line, "SLIM=1", 6)) {
+				in_file = 1;
+				break;
+			}
+		}
+		fclose(fp);
+	}
+	return in_file != (nvram_get_int("mh_slim") == 1);
+}
+
 /* fake-ip 开关 (nvram mh_fakeip) 与 /tmp 里现行配置的 enhanced-mode 是否不一致。
  * restart 沿用旧 CFG, 模式变了必须走 update 重建配置 —— 此时"应用"按钮
  * 自动升级成一次"更新订阅"。读不到配置文件返回 0 (不触发)。 */
@@ -2657,14 +2681,9 @@ mihomo_slim_state_hook(int eid, webs_t wp, int argc, char **argv)
 	char line[128];
 	int on = 0;
 
-	if (!f_exists(MH_SLIM_CONF)) {
-		websWrite(wp, "<span class=\"label\">关闭</span>"
-			"&nbsp;<span style=\"color:#999;\">没有 slim.conf</span>");
-		return 0;
-	}
-
-	/* 只认 SLIM=1 这一行, 其它行原样忽略 (和 mihomo-start 的解析保持一致) */
-	if (mihomo_read_line(MH_SLIM_CONF, line, sizeof(line)) == 0) {
+	/* 标签只反映“实际生效”状态: do_slim 认的是 slim.conf 里的 SLIM=1,
+	 * nvram mh_slim 只是面板上的期望值, 两者不一致时另外补一句提示。 */
+	if (f_exists(MH_SLIM_CONF)) {
 		FILE *fp = fopen(MH_SLIM_CONF, "r");
 
 		if (fp) {
@@ -2680,11 +2699,13 @@ mihomo_slim_state_hook(int eid, webs_t wp, int argc, char **argv)
 	}
 
 	if (on)
-		websWrite(wp, "<span class=\"label label-success\">开启</span>"
-			"&nbsp;<span style=\"color:#999;\">%s</span>", MH_SLIM_CONF);
+		websWrite(wp, "<span class=\"label label-success\">已应用</span>");
 	else
-		websWrite(wp, "<span class=\"label\">关闭</span>"
-			"&nbsp;<span style=\"color:#999;\">%s 里 SLIM 不是 1</span>", MH_SLIM_CONF);
+		websWrite(wp, "<span class=\"label\">未开启</span>");
+
+	/* 开关与 slim.conf 不一致: 说明改了还没点“应用” */
+	if (mihomo_slim_changed())
+		websWrite(wp, "&nbsp;<span style=\"color:#C60;\">开关有改动，点“应用”生效</span>");
 
 	return 0;
 }
@@ -2781,6 +2802,12 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 	/* fake-ip 开关和现行配置不一致 => restart 不够, 升级成一次重建 */
 	if (!do_update && mihomo_dns_mode_changed())
 		do_update = 1;
+
+	/* 订阅精简开关变了 => 先把 slim.conf 对齐, 再重建配置才生效 */
+	if (mihomo_slim_changed()) {
+		doSystem("%s slim %s", MH_CTL, nvram_get_int("mh_slim") ? "on" : "off");
+		do_update = 1;
+	}
 
 	if (enabled && !f_exists(MH_BIN))
 		err = "固件里没有 /usr/bin/mihomo (编译时没开 CONFIG_FIRMWARE_INCLUDE_MIHOMO)";

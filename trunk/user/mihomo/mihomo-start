@@ -127,10 +127,23 @@ count_rules() {
 # ---------------------------------------------------------------------------
 do_slim() {
 	F="$1"
-	[ -f "$SLIM_CONF" ] || return 0
-	# shellcheck disable=SC1090
-	. "$SLIM_CONF" 2>/dev/null
-	[ "${SLIM:-0}" = "1" ] || return 0
+	# 开关有两个入口, 任一为真即启用, 两处由 slim on/off 同步成一致:
+	#   nvram mh_slim=1   面板上的开关
+	#   slim.conf SLIM=1  命令行 mihomo-start slim on
+	ENABLED=0
+	[ "$(nvram get mh_slim 2>/dev/null)" = "1" ] && ENABLED=1
+	# 默认项先铺一遍, 文件里的同名变量再覆盖它
+	SLIM_DEDUP=1
+	SLIM_CUT_AFTER_MATCH=1
+	SLIM_DISABLE_SNIFFER=1
+	SLIM_DNS_MAX=3
+	SLIM_GEO_AUTOUPDATE=0
+	if [ -f "$SLIM_CONF" ]; then
+		# shellcheck disable=SC1090
+		. "$SLIM_CONF" 2>/dev/null
+		[ "${SLIM:-0}" = "1" ] && ENABLED=1
+	fi
+	[ "$ENABLED" = "1" ] || return 0
 	: "${SLIM_DEDUP:=1}"
 	: "${SLIM_CUT_AFTER_MATCH:=1}"
 	: "${SLIM_DISABLE_SNIFFER:=1}"
@@ -602,18 +615,23 @@ case "$1" in
 					echo 'SLIM_DNS_MAX=3'
 					echo 'SLIM_GEO_AUTOUPDATE=0'
 				} > "$SLIM_CONF"
+				# 同步面板开关, 两处状态保持一致
+				nvram set mh_slim=1
+				nvram commit >/dev/null 2>&1
 				log "精简已开启: $SLIM_CONF (执行 mihomo-start update 生效)"
 				;;
 			off)
 				rm -f "$SLIM_CONF"
+				nvram set mh_slim=0
+				nvram commit >/dev/null 2>&1
 				log "精简已关闭: 下次 update 恢复订阅原始内容"
 				;;
 			status)
-				if [ -f "$SLIM_CONF" ]; then
-					echo "精简: 开  ($SLIM_CONF)"
-					cat "$SLIM_CONF"
+				if [ -f "$SLIM_CONF" ] || [ "$(nvram get mh_slim 2>/dev/null)" = "1" ]; then
+					echo "精简: 开"
+					[ -f "$SLIM_CONF" ] && cat "$SLIM_CONF"
 				else
-					echo "精简: 关  (无 $SLIM_CONF)"
+					echo "精简: 关  (无 $SLIM_CONF, mh_slim=0)"
 				fi
 				;;
 			*) echo "用法: mihomo-start slim [on|off|status]"; exit 1 ;;
