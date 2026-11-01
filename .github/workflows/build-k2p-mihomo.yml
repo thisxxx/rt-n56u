@@ -412,7 +412,7 @@ jobs:
             echo "| geo 数据进 squashfs | $GEO_SQ | $(awk "BEGIN{printf \"%.3f\", $GEO_SQ/1048576}") |"
             echo "| **trx 合计** | **$SIZE** | **$(awk "BEGIN{printf \"%.3f\", $SIZE/1048576}")** |"
             echo "| 自限 15.0 MiB | $MAX_TRX_SIZE | 15.000 |"
-            echo "| 分区 15.375 MiB | $PART_SIZE | 15.375 |"
+            echo "| 分区 15.1875 MiB | $PART_SIZE | 15.1875 |"
             echo "| 距自限余量 | $MARGIN | $(awk "BEGIN{printf \"%.3f\", $MARGIN/1048576}") |"
             echo ""
             echo "### 组件来源"
