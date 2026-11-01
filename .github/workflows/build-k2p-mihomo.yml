@@ -58,7 +58,7 @@ env:
   MIHOMO_REF: v1.18.10
   MIHOMO_TAGS: no_fake_tcp,no_tailscale,no_zerotier,no_easytier,with_low_memory
   # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
-  SQUASHFS_BLOCK: 131072
+  SQUASHFS_BLOCK: 524288
 
 jobs:
   build:
@@ -278,15 +278,10 @@ jobs:
           grep -E '^CONFIG_FIRMWARE_(INCLUDE|ENABLE)_(MIHOMO|EASYTIER|IPSET|OPENSSH|DROPBEAR|SFTP|OPENSSL_EC|CURL|LANG_CN|USB|TTYD|MINIDLNA)' "$CFG" || true
 
           # ---- 5. squashfs 块大小 ----
-          # 2026-11-01: 回退到 mksquashfs 默认 128K(与官方 Padavan 一致), 排查实机刷入橙灯。
-          # 若 Makefile 里又出现 -b 524288 说明改动被覆盖, 直接报错。
-          # 注意用 if 而非 &&, 因为 set -e 下 grep 不匹配会让整条语句失败退出。
-          if grep -q 'mksquashfs .*-b 524288' $T/vendors/Ralink/MT7621/Makefile; then
-            echo "::error::MT7621 Makefile 又出现 -b 524288, 与官方不一致"; exit 1
-          fi
-          grep -q 'mksquashfs $(ROMFSDIR) $(RAMDISK) -all-root' $T/vendors/Ralink/MT7621/Makefile \
-            || { echo "::error::MT7621 Makefile 未按预期调用 mksquashfs"; exit 1; }
-          echo "squashfs 块大小: $SQUASHFS_BLOCK (默认 128K)"
+          # 128K 与 512K 实测都是橙灯, 证明与块大小无关, 已恢复 512K(省 ~0.67MB)。
+          grep -q 'mksquashfs .*-b 524288' $T/vendors/Ralink/MT7621/Makefile \
+            || { echo "::error::MT7621 Makefile 未设置 mksquashfs -b 524288, 体积会超标"; exit 1; }
+          echo "squashfs 块大小: $SQUASHFS_BLOCK"
           echo "编译前校验全部通过"
 
       - name: 编译固件 K2P
