@@ -50,6 +50,7 @@
 #
 # 3. 运行时文件 (RAM, 重启消失):
 #      /tmp/mihomo/config.yaml              运行配置 (最后一次校验通过版)
+#      /tmp/mihomo/.mode                    当前配置来源: normal / fallback
 #      /tmp/mihomo/config.yaml.ok           同上备份, 排错用
 #      /tmp/mihomo.log                      运行日志
 #
@@ -78,6 +79,8 @@ SLIM_CONF=$STOR/slim.conf
 STATF=/tmp/mihomo/.slimstat
 # 拉订阅的进度标记, 供 Web 页面轮询: running / ok / fail
 FETCH_STAT=/tmp/mihomo/.fetch_status
+# 当前跑的是真实订阅还是内置兜底: normal / fallback
+MODE_STAT=/tmp/mihomo/.mode
 LOG=/tmp/mihomo.log
 
 ET_BIN=/usr/bin/easytier-core
@@ -207,6 +210,45 @@ do_slim() {
 
 
 # ---------------------------------------------------------------------------
+# 内置兜底配置
+#   触发场景: 开机时 WAN 还没拿到地址 / 订阅域名被墙 / 订阅地址填错 —— 拉不到配置。
+#   此时若直接退出, mihomo 不起, 9090 面板也打不开, 用户连"在哪改订阅地址"都看不到,
+#   只能靠 SSH 摸黑操作。所以这里写一份最小可用配置把进程托起来。
+#
+#   兜底配置的特征: 只有 MATCH,DIRECT 一条规则, 不接管任何流量(不写 iptables),
+#   等于"装了个空转的 mihomo"—— 面板能进、管理页能改地址, 但上网行为与没装一样。
+#   用户改好订阅后执行 mihomo-start update, 真实配置会覆盖它并把流量接管回来。
+# ---------------------------------------------------------------------------
+write_fallback_cfg() {
+	mkdir -p "$RUNDIR"
+	cat > "$CFG" <<EOF
+# 内置兜底配置 (订阅不可用时自动生成)
+# 下次 update 拉到真实订阅后会被整份覆盖, 手改这里没有意义
+mixed-port: $HTTP_PORT
+redir-port: $PROXY_PORT
+tproxy-port: $PROXY_PORT
+allow-lan: true
+bind-address: '*'
+mode: rule
+log-level: warning
+external-controller: 0.0.0.0:9090
+external-ui: /usr/share/mihomo/ui
+dns:
+  enable: true
+  listen: 0.0.0.0:$DNS_PORT
+  enhanced-mode: redir-host
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+proxies: []
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+EOF
+	return 0
+}
+
+# ---------------------------------------------------------------------------
 # 下载订阅 + 内置 sed 补丁 + 用户 my_sed.sh 钩子 + 校验
 # 成功返回 0
 # ---------------------------------------------------------------------------
@@ -274,6 +316,7 @@ do_fetch() {
 
 	mv -f "$CFG_NEW" "$CFG"
 	cp -f "$CFG" "$CFG_BAK"
+	printf 'normal' > "$MODE_STAT" 2>/dev/null
 	log "配置更新完成 ($(wc -c < "$CFG") 字节)"
 	return 0
 }
@@ -358,7 +401,17 @@ do_start() {
 	RUNNING=$(pidof mihomo)
 	[ -n "$RUNNING" ] && { echo "mihomo 已在运行 (pid $RUNNING)"; exit 0; }
 	# /tmp 无可用配置则先拉取 (开机首次必走)
-	[ -f "$CFG" ] || { do_fetch || exit 1; }
+	if [ ! -f "$CFG" ]; then
+		if do_fetch; then
+			printf 'normal' > "$MODE_STAT" 2>/dev/null
+		else
+			# 拉不到不能直接退出: 断了网/被墙/地址写错时, 进程起不来就等于面板也进不去,
+			# 用户没法改订阅地址。用内置兜底配置把服务托起来, 流量不接管。
+			log "订阅不可用, 改用内置兜底配置启动 (面板可进, 流量不接管)"
+			write_fallback_cfg || exit 1
+			printf 'fallback' > "$MODE_STAT" 2>/dev/null
+		fi
+	fi
 	mkdir -p "$RUNDIR"
 	cd "$RUNDIR" || exit 1
 	# 128MB 无 swap 机器的保命参数:
@@ -367,9 +420,22 @@ do_start() {
 	#   GOMAXPROCS=2
 	GOMEMLIMIT="${MIHOMO_MEMLIMIT:-48MiB}" GOGC=40 GOMAXPROCS=2 \
 		nohup "$MIHOMO_BIN" -d "$RUNDIR" -f "$CFG" >>"$LOG" 2>&1 &
-	sleep 2
+	MPID=$!
+	# 不能只 sleep 2 就判死活: MT7621 上 9816 条规则 + 18 个节点要 5-15 秒才起完,
+	# 开机自启时更容易慢。这里轮询到进程出现为止, 进程自己退出则立刻判失败。
+	i=0
+	while [ "$i" -lt "${MIHOMO_START_WAIT:-30}" ]; do
+		pidof mihomo >/dev/null 2>&1 && break
+		kill -0 "$MPID" 2>/dev/null || break
+		i=$((i + 1))
+		sleep 1
+	done
 	pidof mihomo >/dev/null || { log "启动失败, 查看日志: $LOG"; tail -5 "$LOG"; exit 1; }
-	fw_start
+	if [ "$(cat "$MODE_STAT" 2>/dev/null)" = "fallback" ]; then
+		log "兜底模式: 不接管流量 (未下发 iptables), 修好订阅后执行 mihomo-start update"
+	else
+		fw_start
+	fi
 	et_start
 	log "已启动 (pid $(pidof mihomo)), 订阅: $SUB_URL_FILE, 自定义sed: $USER_SED"
 	# YACD 面板: 静态资源由固件编入 /usr/share/mihomo/ui, 由配置里的 external-ui 指过去
@@ -419,6 +485,10 @@ case "$1" in
 	status)
 		if pidof mihomo >/dev/null 2>&1; then
 			echo "running pid $(pidof mihomo)"
+			case "$(cat "$MODE_STAT" 2>/dev/null)" in
+				fallback) echo "配置: 内置兜底 (订阅未拉到, 流量未接管)" ;;
+				*)        echo "配置: 正常订阅" ;;
+			esac
 		else
 			echo "stopped"
 		fi

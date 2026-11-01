@@ -2436,6 +2436,8 @@ easytier_action_hook(int eid, webs_t wp, int argc, char **argv)
 #define MH_SLIM_CONF		"/etc/storage/mihomo/slim.conf"
 #define MH_SUB_FILE		"/etc/storage/mihomo/sub_url.txt"
 #define MH_FETCH_STAT		"/tmp/mihomo/.fetch_status"
+/* mihomo-start 写的配置来源标记: normal=真实订阅 / fallback=内置兜底 */
+#define MH_MODE			"/tmp/mihomo/.mode"
 
 /* 按 /proc/<pid>/comm 找进程 —— 不依赖 pidof 是否在 httpd 的 PATH 里 */
 static int
@@ -2597,6 +2599,11 @@ mihomo_status_hook(int eid, webs_t wp, int argc, char **argv)
 	}
 
 	websWrite(wp, "<span class=\"label label-success\">运行中</span>&nbsp;PID <b>%d</b>", pid);
+
+	/* 兜底模式必须显眼提示: 进程在跑但没接管流量, 用户会以为代理已生效 */
+	if (mihomo_read_line(MH_MODE, st, sizeof(st)) == 0 && !strcmp(st, "fallback"))
+		websWrite(wp, "&nbsp;<span class=\"label label-warning\">兜底配置</span>"
+			"&nbsp;<span style=\"color:#c00;\">订阅未拉到, 当前未接管流量; 填好订阅地址后点「更新订阅」</span>");
 
 	up = mihomo_uptime(pid);
 	if (up >= 0)
