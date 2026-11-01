@@ -336,6 +336,17 @@ jobs:
             echo "::warning::没有可用的 unsquashfs，跳过 squashfs 抽查"
           fi
 
+          echo "===== 体积审计：romfs 内最大的 15 个文件 ====="
+          # pipefail 下 find 会被 head 提前关闭触发 SIGPIPE(141), 用子 shell + || true 兜住
+          { find romfs -type f -printf '%s %p\n' | sort -rn | head -15 > /tmp/top15.txt; } || true
+          awk '{printf "%9.1f KiB  %s\n", $1/1024, $2}' /tmp/top15.txt
+
+          echo "===== 体积审计：关键文件 / 面板开销 ====="
+          ls -l romfs/usr/sbin/httpd romfs/usr/bin/mihomo-start \
+                romfs/www/Advanced_Mihomo_Content.asp romfs/www/Advanced_EasyTier_Content.asp \
+                2>/dev/null || true
+          du -sk romfs/www romfs/usr/share/mihomo/ui 2>/dev/null || true
+
           echo "===== 单组件压缩占用（同块大小实测）====="
           MK=./tools/mksquashfs_xz/mksquashfs
           MH_SQ=0; ET_SQ=0; UI_SQ=0
