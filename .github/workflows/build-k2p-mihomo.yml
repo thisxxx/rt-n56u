@@ -36,13 +36,16 @@ env:
   PART_SIZE: 16121856
   # 未压缩 mihomo 的精确字节数
   MIHOMO_SIZE: 30802086
-  # 未压缩 easytier-lite v0.2.0 的精确字节数
-  EASYTIER_SIZE: 6698364
+  # easytier 版本号 (仅用于命名与说明, 实际以 EASYTIER_URL 为准)
+  ET_VER: "0.2.5"
+  # easytier raw 字节数: 准备步骤会按实际下载解包结果动态覆盖, 不再手工维护
+  EASYTIER_SIZE: 0
   # yacd public/ 原始字节数 (45 个文件)
   YACD_UI_BYTES: 1135385
   # ---- 二进制来源 ----
-  # easytier lite v0.2.1 (mipsel), CI 内下载解包, 不要在本地转存
-  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.1-20261031-ae09a40/easytier-lite-linux-mipsel.zip
+  # easytier lite v0.2.5 (mipsel), CI 内下载解包, 不要在本地转存
+  # 换版本只需改这一行 + ET_VER
+  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.5-20261101-b2e3b2e/easytier-lite-linux-mipsel.zip
   # lite 变体的 mihomo 版本与精简 tag
   MIHOMO_REF: v1.18.10
   MIHOMO_TAGS: no_fake_tcp,no_tailscale,no_zerotier,no_easytier,with_low_memory
@@ -114,6 +117,7 @@ jobs:
           ET=$(find /tmp/et -type f \( -name 'easytier-lite*' -o -name 'easytier-core*' \) | head -1)
           [ -n "$ET" ] || { echo "::error::压缩包里找不到 easytier 二进制"; unzip -l /tmp/et.zip; exit 1; }
           echo "包内取到: $ET ($(stat -c%s "$ET") 字节)"
+          echo "UPX 包 sha256: $(sha256sum "$ET" | cut -d' ' -f1)"
           # release 里发布的是 UPX(lzma) 包, 必须先解开: UPX 版运行时会整体解压进匿名内存, 128MB 机器会 OOM
           if head -c 512 "$ET" | grep -aq 'UPX!'; then
             echo "检测到 UPX 壳, 解包..."
@@ -123,10 +127,12 @@ jobs:
             /tmp/upx-4.2.4-amd64_linux/upx -d -o /tmp/easytier.raw "$ET" >/dev/null
             ET=/tmp/easytier.raw
             echo "解包后: $(stat -c%s "$ET") 字节"
+            echo "解包后 sha256: $(sha256sum "$ET" | cut -d' ' -f1)"
           fi
           install -m 0755 "$ET" "$T/user/easytier/easytier-core"
           EASYSZ=$(stat -c%s "$T/user/easytier/easytier-core")
           echo "EASYTIER_SIZE=$EASYSZ" >> "$GITHUB_ENV"
+          echo "ET_SHA256=$(sha256sum "$T/user/easytier/easytier-core" | cut -d' ' -f1)" >> "$GITHUB_ENV"
           echo "easytier-core: $EASYSZ 字节 ($(awk "BEGIN{printf \"%.3f\", $EASYSZ/1048576}") MiB)"
 
           # ---- mihomo: lite 变体现场交叉编译 (MIPS32 小端软浮点, 全静态) ----
@@ -172,10 +178,12 @@ jobs:
           ETBIN=$T/user/easytier/easytier-core
           test -f "$ETBIN" || { echo "::error::easytier-core 缺失: $ETBIN"; exit 1; }
           ETSIZE=$(stat -c%s "$ETBIN")
-          echo "easytier-core: $ETSIZE 字节 (期望 $EASYTIER_SIZE)"
-          [ "$ETSIZE" -eq "$EASYTIER_SIZE" ] || {
-            echo "::error::easytier-core 大小异常(应为 $EASYTIER_SIZE): $ETSIZE"
-            echo "::error::UPX 版约 1,769,144 字节, 请换回未压缩原始二进制"
+          echo "easytier-core: $ETSIZE 字节  sha256=$(sha256sum "$ETBIN" | cut -d' ' -f1)"
+          echo "来源: $(basename "$EASYTIER_URL")"
+          # UPX 没解开时体积会掉到 2 MiB 以下, 这条才是有独立意义的校验
+          [ "$ETSIZE" -gt 4000000 ] || {
+            echo "::error::easytier-core 仅 $ETSIZE 字节, 疑似 UPX 未解包 (UPX 版约 1.9 MB)"
+            echo "::error::正常未压缩版应在 6-8 MB 量级"
             exit 1; }
           ETMAGIC=$(od -An -tx1 -N20 "$ETBIN" | tr -d ' \n')
           case "$ETMAGIC" in
@@ -309,6 +317,8 @@ jobs:
           echo "距自限余量:   $MARGIN 字节 ($(awk "BEGIN{printf \"%.3f\", $MARGIN/1048576}") MiB)"
           echo "分区剩余空间: $PARTLEFT 字节 ($(awk "BEGIN{printf \"%.3f\", $PARTLEFT/1048576}") MiB, 分区共 $PART_SIZE)"
           {
+            echo "### 体积明细"
+            echo ""
             echo "| 项目 | 字节 | MiB |"
             echo "|---|---|---|"
             echo "| rootfs (squashfs xz, -b $SQUASHFS_BLOCK) | $ROOTFS | $(awk "BEGIN{printf \"%.3f\", $ROOTFS/1048576}") |"
@@ -319,6 +329,15 @@ jobs:
             echo "| 自限 15.0 MiB | $MAX_TRX_SIZE | 15.000 |"
             echo "| 分区 15.375 MiB | $PART_SIZE | 15.375 |"
             echo "| 距自限余量 | $MARGIN | $(awk "BEGIN{printf \"%.3f\", $MARGIN/1048576}") |"
+            echo ""
+            echo "### 组件来源"
+            echo ""
+            echo "| 组件 | raw 字节 | sha256 |"
+            echo "|---|---|---|"
+            echo "| mihomo (${{ inputs.variant || 'full' }}) | $MIHOMO_SIZE | -- |"
+            echo "| easytier-lite v$ET_VER | $EASYTIER_SIZE | $ET_SHA256 |"
+            echo ""
+            echo "easytier 包: \`$(basename \"$EASYTIER_URL\")\`"
           } | tee size-report.md
 
           cp -f "$TRX" /opt/images/K2P.trx
@@ -335,7 +354,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: K2P-mihomo-${{ inputs.variant || 'full' }}-${{ github.sha }}
+          name: K2P-mihomo-${{ inputs.variant || 'full' }}-et${{ env.ET_VER }}-${{ github.sha }}
           path: |
             /opt/images/K2P.trx
             /opt/images/md5sum.txt
@@ -346,12 +365,12 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: K2P-mihomo-${{ inputs.variant || 'full' }}
-          name: K2P mihomo 固件（${{ inputs.variant || 'full' }} 变体）
+          tag_name: K2P-mihomo-${{ inputs.variant || 'full' }}-et${{ env.ET_VER }}
+          name: K2P mihomo 固件（${{ inputs.variant || 'full' }} / easytier v${{ env.ET_VER }}）
           body: |
             斐讯 K2P A1/A2（MT7621A + MT7615D，16MB NOR / 128MB RAM）Padavan 固件，
-            内置 **未压缩** mihomo（30,802,086 B）、easytier-lite v0.2.0（6,698,364 B）
-            与 yacd 面板静态资源（/usr/share/mihomo/ui）。
+            内置 **未压缩** mihomo、easytier-lite **v${{ env.ET_VER }}** 与 yacd 面板静态资源（/usr/share/mihomo/ui）。
+            各组件 raw 字节与 sha256 见 size-report.md（随本 release 一同发布）。
 
             - 模板：`trunk/configs/templates/K2P_nano.config`
             - squashfs 块 512 KiB（xz），Go 静态二进制压缩率明显改善
