@@ -51,6 +51,8 @@
 # 3. 运行时文件 (RAM, 重启消失):
 #      /tmp/mihomo/config.yaml              运行配置 (最后一次校验通过版)
 #      /tmp/mihomo/.mode                    当前配置来源: normal / fallback
+#      /usr/share/mihomo/geoip.metadb       geo 数据(精简版), 启动时拷到 /tmp/mihomo/
+#      /usr/share/mihomo/geosite.dat         同上
 #      /tmp/mihomo/config.yaml.ok           同上备份, 排错用
 #      /tmp/mihomo.log                      运行日志
 #
@@ -210,6 +212,23 @@ do_slim() {
 
 
 # ---------------------------------------------------------------------------
+# geo 数据补种
+#   mihomo 只在自己 homeDir(-d, 即 $RUNDIR) 下找 geoip.metadb / geosite.dat,
+#   找不到就去 GitHub 拉全量库(geoip.metadb 8.04 MiB / geosite.dat 4.15 MiB),
+#   而且是在解析到 GEOIP/GEOSITE 规则的那一刻同步下载, 失败即配置加载失败。
+#   固件里预置了精简版(CN/JP + 常用集合, 合计约 0.5 MiB), 每次启动从 squashfs 拷过去。
+#   拷贝量很小, 且只在 /tmp 缺文件时做, 不会覆盖用户自己下载的完整版。
+# ---------------------------------------------------------------------------
+geo_seed() {
+	mkdir -p "$RUNDIR"
+	for _f in geoip.metadb geosite.dat; do
+		[ -s "$RUNDIR/$_f" ] && continue
+		[ -s "/usr/share/mihomo/$_f" ] || continue
+		cp -f "/usr/share/mihomo/$_f" "$RUNDIR/$_f" 2>/dev/null || log "拷贝 geo 数据失败: $_f"
+	done
+}
+
+# ---------------------------------------------------------------------------
 # 内置兜底配置
 #   触发场景: 开机时 WAN 还没拿到地址 / 订阅域名被墙 / 订阅地址填错 —— 拉不到配置。
 #   此时若直接退出, mihomo 不起, 9090 面板也打不开, 用户连"在哪改订阅地址"都看不到,
@@ -270,6 +289,8 @@ do_fetch() {
 	[ -n "$SUB_URL" ] || { log "没有订阅地址: 到 Web 页面填, 或写入 $SUB_URL_FILE"; return 1; }
 
 	mkdir -p "$RUNDIR"
+	# 必须在 mihomo -t 之前补种: 校验阶段解析到 GEOIP 规则同样会触发下载
+	geo_seed
 	log "拉取订阅..."
 	wget -q -T 20 -O "$CFG_NEW" \
 		--user-agent="clash.meta/v1.18.0" \
@@ -280,6 +301,7 @@ do_fetch() {
 	sed -i \
 		-e "s/^allow-lan:.*/allow-lan: true/" \
 		-e "s/^log-level:.*/log-level: warning/" \
+		-e "s/^geo-auto-update:.*/geo-auto-update: false/" \
 		-e "s/^external-controller:.*/external-controller: 0.0.0.0:9090/" \
 		-e "s/^external-ui:.*/external-ui: \/usr\/share\/mihomo\/ui/" \
 		-e "s/^mixed-port:.*/mixed-port: $HTTP_PORT/" \
@@ -294,6 +316,8 @@ do_fetch() {
 	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $PROXY_PORT" "$CFG_NEW"
 	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向
 	grep -q "^dns:" "$CFG_NEW" || sed -i "1i dns: { enable: true, listen: 0.0.0.0:$DNS_PORT, enhanced-mode: redir-host }" "$CFG_NEW"
+	# geo 自动更新会定期拉全量库(8+4 MiB), 128MB 机器扛不住, 统一关掉
+	grep -q "^geo-auto-update:" "$CFG_NEW" || sed -i "1i geo-auto-update: false" "$CFG_NEW"
 
 	# ---- 订阅精简 (开关: $SLIM_CONF 内 SLIM=1; 在用户钩子之前, 用户改动不会被覆盖) ----
 	do_slim "$CFG_NEW" || log "精简未生效, 按原配置继续"
@@ -413,6 +437,7 @@ do_start() {
 		fi
 	fi
 	mkdir -p "$RUNDIR"
+	geo_seed
 	cd "$RUNDIR" || exit 1
 	# 128MB 无 swap 机器的保命参数:
 	#   GOMEMLIMIT  强制 Go 堆上限 (mihomo Go>=1.19 才支持), 防止规则解析吃爆内存被 OOM

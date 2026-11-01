@@ -30,6 +30,12 @@ romfs:
 	# romfs-inst.sh 支持目录源: src 是目录时递归 cpio 进 $(ROMFSDIR)$(dst)
 	# (-d 只用于确保 dst 的父目录存在)
 	$(ROMFSINST) -d -S $(THISDIR)/ui /usr/share/mihomo/ui
+	# geo 数据(精简版): 只含 CN/JP 与常用集合
+	# 为什么必须预置: mihomo 在 -d 目录下找不到 geoip.metadb 时, 会在解析到 GEOIP 规则的那一刻
+	# 去 GitHub 拉全量库(8.04 MiB), 并整份驻留内存 —— 128MB 机器吃不住, 国内还常被墙;
+	# 拉不到就直接报错, 整个配置加载失败。预置精简版后, GEOIP/GEOSITE 规则完全离线可用。
+	$(ROMFSINST) -S $(THISDIR)/geoip.metadb /usr/share/mihomo/geoip.metadb
+	$(ROMFSINST) -S $(THISDIR)/geosite.dat /usr/share/mihomo/geosite.dat
 
 clean:
 	@true

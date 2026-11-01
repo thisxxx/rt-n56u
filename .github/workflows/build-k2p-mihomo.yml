@@ -42,6 +42,10 @@ env:
   EASYTIER_SIZE: 0
   # yacd public/ 原始字节数 (45 个文件)
   YACD_UI_BYTES: 1135385
+  # geo 数据(精简版): 只含 CN/JP 与常用集合, 合计约 0.5 MiB, 能塞进固件
+  GEO_BASE: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest
+  GEOIP_SIZE: 0
+  GEOSITE_SIZE: 0
   # ---- 二进制来源 ----
   # easytier lite v0.2.5 (mipsel), CI 内下载解包, 不要在本地转存
   # 换版本只需改这一行 + ET_VER
@@ -151,6 +155,61 @@ jobs:
           MHSZ=$(stat -c%s "$T/user/mihomo/mihomo")
           echo "MIHOMO_SIZE=$MHSZ" >> "$GITHUB_ENV"
           echo "mihomo: $MHSZ 字节 ($(awk "BEGIN{printf \"%.3f\", $MHSZ/1048576}") MiB)  variant=$VARIANT"
+
+          # ---- geo 数据: 精简版 geoip/geosite ----
+          # mihomo 在 -d 目录找不到 geoip.metadb 时, 会在解析到 GEOIP 规则的那一刻去 GitHub
+          # 拉全量库(8.04 MiB), 整份驻留内存, 拉不到则配置加载直接失败。
+          # 128MB 机器 + 国内网络, 这条路基本必挂, 所以固件内预置精简版。
+          curl -fL --retry 3 --retry-delay 5 -o "$T/user/mihomo/geoip.metadb" "$GEO_BASE/geoip-lite.metadb"
+          curl -fL --retry 3 --retry-delay 5 -o "$T/user/mihomo/geosite.dat"  "$GEO_BASE/geosite-lite.dat"
+          GIP=$(stat -c%s "$T/user/mihomo/geoip.metadb"); GST=$(stat -c%s "$T/user/mihomo/geosite.dat")
+          echo "GEOIP_SIZE=$GIP" >> "$GITHUB_ENV"
+          echo "GEOSITE_SIZE=$GST" >> "$GITHUB_ENV"
+          echo "geoip.metadb: $GIP 字节 ($(awk "BEGIN{printf \"%.3f\", $GIP/1048576}") MiB) sha256=$(sha256sum "$T/user/mihomo/geoip.metadb" | cut -d' ' -f1)"
+          echo "geosite.dat : $GST 字节 ($(awk "BEGIN{printf \"%.3f\", $GST/1048576}") MiB) sha256=$(sha256sum "$T/user/mihomo/geosite.dat" | cut -d' ' -f1)"
+          [ "$GIP" -gt 100000 ] && [ "$GST" -gt 50000 ] || { echo "::error::geo 数据体积异常, 疑似下载到错误页"; exit 1; }
+
+      - name: geo 数据自检（断网状态下用 x86 版 mihomo 验证精简库可用）
+        run: |
+          set -euo pipefail
+          T=/opt/rt-n56u/trunk
+          # 这段的目的是证明"离线可用": 如果 lite 库不被接受, mihomo 会去下载全量库,
+          # 而 unshare -n 下没有网络, 下载必失败 -> 步骤失败。比肉眼看着像就放过靠谱。
+          rm -rf /tmp/geotest && mkdir -p /tmp/geotest
+          cp "$T/user/mihomo/geoip.metadb" "$T/user/mihomo/geosite.dat" /tmp/geotest/
+          cat > /tmp/geotest/config.yaml <<'CFG'
+          mixed-port: 7893
+          allow-lan: true
+          mode: rule
+          log-level: warning
+          proxies: []
+          proxy-groups: []
+          rules:
+            - GEOIP,CN,DIRECT
+            - MATCH,DIRECT
+          CFG
+          BEFORE=$(sha256sum /tmp/geotest/geoip.metadb | cut -d' ' -f1)
+          curl -fL --retry 3 -o /tmp/mihomo-amd64.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/$(echo $MIHOMO_REF)/mihomo-linux-amd64-compatible-$(echo $MIHOMO_REF).gz"
+          gzip -dc /tmp/mihomo-amd64.gz > /tmp/mihomo-amd64 && chmod +x /tmp/mihomo-amd64
+          set +e
+          if sudo unshare -n true 2>/dev/null; then
+            sudo unshare -n /tmp/mihomo-amd64 -t -d /tmp/geotest -f /tmp/geotest/config.yaml > /tmp/geotest/out.log 2>&1
+            RC=$?
+          else
+            echo "::warning::unshare 不可用, 改为常规自检(靠 sha256 未变化判断是否触发过下载)"
+            /tmp/mihomo-amd64 -t -d /tmp/geotest -f /tmp/geotest/config.yaml > /tmp/geotest/out.log 2>&1
+            RC=$?
+          fi
+          set -e
+          cat /tmp/geotest/out.log
+          AFTER=$(sha256sum /tmp/geotest/geoip.metadb | cut -d' ' -f1)
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::离线自检失败(rc=$RC): 精简 geo 库无法满足 GEOIP,CN 规则, 真机上会退化成兜底配置"
+            exit 1
+          fi
+          [ "$BEFORE" = "$AFTER" ] || { echo "::error::自检过程中 geoip.metadb 被改写(触发过下载), 精简库不可用"; exit 1; }
+          echo "geo 自检通过: GEOIP,CN 规则在无网络环境下可正常解析, 且未触发任何下载"
 
       - name: 编译前校验（二进制字节数 / yacd / 模板开关 / 模块注册）
         run: |
@@ -297,10 +356,18 @@ jobs:
             rm -f /tmp/sq_ui.sq
             "$MK" /tmp/sqbase /tmp/sq_ui.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
             UI_SQ=$(( $(stat -c%s /tmp/sq_ui.sq) - BASE ))
+            rm -rf /tmp/sqbase/usr/share
+            mkdir -p /tmp/sqbase/usr/share/mihomo
+            cp -f "$T/user/mihomo/geoip.metadb" "$T/user/mihomo/geosite.dat" /tmp/sqbase/usr/share/mihomo/
+            rm -f /tmp/sq_geo.sq
+            "$MK" /tmp/sqbase /tmp/sq_geo.sq -b "$SQUASHFS_BLOCK" -all-root -no-exports -noappend -nopad -noI -no-xattrs >/dev/null 2>&1
+            GEO_SQ=$(( $(stat -c%s /tmp/sq_geo.sq) - BASE ))
+            rm -rf /tmp/sqbase/usr/share
             echo "mihomo        : $MIHOMO_SIZE -> $MH_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $MH_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$MH_SQ/$MIHOMO_SIZE}")%)"
             echo "easytier-core : $EASYTIER_SIZE -> $ET_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $ET_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$ET_SQ/$EASYTIER_SIZE}")%)"
             echo "yacd ui       : $YACD_UI_BYTES -> $UI_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $UI_SQ/1048576}") MiB, $(awk "BEGIN{printf \"%.1f\", 100*$UI_SQ/$YACD_UI_BYTES}")%)"
-            echo "三者合计占用  : $((MH_SQ + ET_SQ + UI_SQ)) 字节 ($(awk "BEGIN{printf \"%.3f\", ($MH_SQ+$ET_SQ+$UI_SQ)/1048576}") MiB)"
+            echo "geo 数据      : $((GEOIP_SIZE + GEOSITE_SIZE)) -> $GEO_SQ 字节 ($(awk "BEGIN{printf \"%.3f\", $GEO_SQ/1048576}") MiB)"
+            echo "四项合计占用  : $((MH_SQ + ET_SQ + UI_SQ + GEO_SQ)) 字节 ($(awk "BEGIN{printf \"%.3f\", ($MH_SQ+$ET_SQ+$UI_SQ+$GEO_SQ)/1048576}") MiB)"
           else
             echo "::warning::找不到 mksquashfs，跳过分项占用统计"
           fi
@@ -325,6 +392,7 @@ jobs:
             echo "| mihomo 进 squashfs | $MH_SQ | $(awk "BEGIN{printf \"%.3f\", $MH_SQ/1048576}") |"
             echo "| easytier-core 进 squashfs | $ET_SQ | $(awk "BEGIN{printf \"%.3f\", $ET_SQ/1048576}") |"
             echo "| yacd ui 进 squashfs | $UI_SQ | $(awk "BEGIN{printf \"%.3f\", $UI_SQ/1048576}") |"
+            echo "| geo 数据进 squashfs | $GEO_SQ | $(awk "BEGIN{printf \"%.3f\", $GEO_SQ/1048576}") |"
             echo "| **trx 合计** | **$SIZE** | **$(awk "BEGIN{printf \"%.3f\", $SIZE/1048576}")** |"
             echo "| 自限 15.0 MiB | $MAX_TRX_SIZE | 15.000 |"
             echo "| 分区 15.375 MiB | $PART_SIZE | 15.375 |"
@@ -336,6 +404,8 @@ jobs:
             echo "|---|---|---|"
             echo "| mihomo (${{ inputs.variant || 'full' }}) | $MIHOMO_SIZE | -- |"
             echo "| easytier-lite v$ET_VER | $EASYTIER_SIZE | $ET_SHA256 |"
+            echo "| geoip.metadb (lite) | $GEOIP_SIZE | -- |"
+            echo "| geosite.dat (lite) | $GEOSITE_SIZE | -- |"
             echo ""
             echo "easytier 包: \`$(basename \"$EASYTIER_URL\")\`"
           } | tee size-report.md
