@@ -159,12 +159,14 @@ do_slim() {
 	#   slim.conf SLIM=1  命令行 mihomo-start slim on
 	ENABLED=0
 	[ "$(nvram get mh_slim 2>/dev/null)" = "1" ] && ENABLED=1
-	# 默认项先铺一遍, 文件里的同名变量再覆盖它
-	SLIM_DEDUP=1
-	SLIM_CUT_AFTER_MATCH=1
-	SLIM_DISABLE_SNIFFER=1
-	SLIM_DNS_MAX=3
-	SLIM_GEO_AUTOUPDATE=0
+	# 参数优先级: slim.conf 快照 > nvram(面板) > 内置默认
+	# 快照只是 nvram 的缓存, 而 /etc/storage 需要 mtd_storage.sh save 才落盘,
+	# 重启后快照可能丢; 这种情况下直接读 nvram, 面板上调过的参数不会退回默认
+	SLIM_DEDUP=$(slim_nv mh_slim_dedup 1)
+	SLIM_CUT_AFTER_MATCH=$(slim_nv mh_slim_cut 1)
+	SLIM_DISABLE_SNIFFER=$(slim_nv mh_slim_sniff 1)
+	SLIM_DNS_MAX=$(slim_nv mh_slim_dnsmax 3)
+	SLIM_GEO_AUTOUPDATE=$(slim_nv mh_slim_geoupd 0)
 	if [ -f "$SLIM_CONF" ]; then
 		# shellcheck disable=SC1090
 		. "$SLIM_CONF" 2>/dev/null
@@ -260,6 +262,10 @@ do_slim() {
 	fi
 	A=$(wc -c < "$F" | tr -d ' ')
 	log "订阅精简: 完成 (规则 $R0 -> $R1, 体积 $B -> $A 字节)"
+	# 精简前的副本只用于上面那个回滚, 成功后就删掉:
+	# /tmp 是 tmpfs, 留一份完整配置等于白白多吃几百 KB 到 1 MB 内存。
+	# 想事后比对的话, 前面日志里已记录规则条数与字节数。
+	rm -f "$RUNDIR/config.yaml.preslim"
 	return 0
 }
 
