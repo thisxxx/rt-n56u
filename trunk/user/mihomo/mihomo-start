@@ -23,6 +23,7 @@
 #
 # 1. 订阅地址:
 #      /etc/storage/mihomo/sub_url.txt      一行, 填 clash 格式订阅 URL
+#                                           (Web 界面的 mh_sub_url 优先于本文件)
 #
 # 2. 订阅精简开关 (可选, 默认关闭):
 #      /etc/storage/mihomo/slim.conf        存在且 SLIM=1 时启用
@@ -75,6 +76,8 @@ SUB_URL_FILE=$STOR/sub_url.txt
 USER_SED=$STOR/my_sed.sh
 SLIM_CONF=$STOR/slim.conf
 STATF=/tmp/mihomo/.slimstat
+# 拉订阅的进度标记, 供 Web 页面轮询: running / ok / fail
+FETCH_STAT=/tmp/mihomo/.fetch_status
 LOG=/tmp/mihomo.log
 
 ET_BIN=/usr/bin/easytier-core
@@ -207,10 +210,22 @@ do_slim() {
 # 下载订阅 + 内置 sed 补丁 + 用户 my_sed.sh 钩子 + 校验
 # 成功返回 0
 # ---------------------------------------------------------------------------
+# 订阅地址来源优先级: nvram mh_sub_url (Web 界面写) > $SUB_URL_FILE (手工写文件)
+# Web 界面「高级设置 -> Mihomo」的订阅地址框写的就是 mh_sub_url;
+# 保留文件方式是为了兼容纯 SSH 的用法。两处都空才算没有地址。
+sub_url_get() {
+	_u=$(nvram get mh_sub_url 2>/dev/null | tr -d '\r\n')
+	if [ -n "$_u" ]; then
+		printf '%s' "$_u"
+		return 0
+	fi
+	[ -s "$SUB_URL_FILE" ] || return 1
+	head -n1 "$SUB_URL_FILE" | tr -d '\r\n '
+}
+
 do_fetch() {
-	[ -s "$SUB_URL_FILE" ] || { log "没有订阅地址: $SUB_URL_FILE"; return 1; }
-	SUB_URL=$(head -n1 "$SUB_URL_FILE" | tr -d '\r\n ')
-	[ -n "$SUB_URL" ] || { log "订阅地址为空"; return 1; }
+	SUB_URL=$(sub_url_get)
+	[ -n "$SUB_URL" ] || { log "没有订阅地址: 到 Web 页面填, 或写入 $SUB_URL_FILE"; return 1; }
 
 	mkdir -p "$RUNDIR"
 	log "拉取订阅..."
@@ -371,14 +386,43 @@ do_stop() {
 
 case "$1" in
 	update)
+		# 状态文件给 Web 页面轮询用: 页面点"更新订阅"后是后台跑的,
+		# 靠这个文件判断到底成没成, 而不是靠猜进程在不在
+		mkdir -p "$RUNDIR"
+		printf 'running' > "$FETCH_STAT" 2>/dev/null
 		if do_fetch; then
 			do_stop
 			sleep 1
 			do_start
+			printf 'ok' > "$FETCH_STAT" 2>/dev/null
+		else
+			printf 'fail' > "$FETCH_STAT" 2>/dev/null
+			exit 1
 		fi
 		;;
 	restart) do_stop; sleep 1; do_start ;;
 	stop)    do_stop ;;
+	autostart)
+		# 开机钩子调用: 只有 mh_autostart=1 才起
+		[ "$(nvram get mh_autostart 2>/dev/null)" = "1" ] || exit 0
+		pidof mihomo >/dev/null 2>&1 && exit 0
+		# rc 在 system ready 后调用, 但 WAN 拿到地址可能还差几秒;
+		# 拉订阅要联网, 所以这里先给一小段缓冲, 避免开机第一拉必失败
+		i=0
+		while [ $i -lt 20 ]; do
+			[ -n "$(nvram get wan0_ipaddr 2>/dev/null)" ] && break
+			i=$((i + 1))
+			sleep 1
+		done
+		do_start
+		;;
+	status)
+		if pidof mihomo >/dev/null 2>&1; then
+			echo "running pid $(pidof mihomo)"
+		else
+			echo "stopped"
+		fi
+		;;
 	et-start) et_start ;;
 	et-stop)  et_stop ;;
 	slim)
@@ -413,5 +457,5 @@ case "$1" in
 		esac
 		;;
 	start|"") do_start ;;
-	*) echo "用法: mihomo-start [start|update|restart|stop|et-start|et-stop|slim on|off|status]"; exit 1 ;;
+	*) echo "用法: mihomo-start [start|update|restart|stop|status|autostart|et-start|et-stop|slim on|off|status]"; exit 1 ;;
 esac

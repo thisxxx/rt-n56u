@@ -951,6 +951,26 @@
 			{0,0,0,0}
 		};
 
+	struct variable variables_EasyTierConf[] = {
+			{"et_enable", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_autostart", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_network_name", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_network_secret", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_ipv4", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_peers", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_subnets", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_private_groups", "", NULL, EVM_BLOCK_UNSAFE},
+			{0,0,0,0}
+		};
+
+	struct variable variables_MihomoConf[] = {
+			{"mh_enable", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_autostart", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_sub_url", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_action", "", NULL, EVM_BLOCK_UNSAFE},
+			{0,0,0,0}
+		};
+
 	struct svcLink svcLinks[] = {
 		{"General",			variables_General},
 		{"Storage",			variables_Storage},
@@ -981,6 +1001,8 @@
 #if defined(APP_SHADOWSOCKS)
 		{"ShadowsocksConf",		variables_ShadowsocksConf},
 #endif
+		{"EasyTierConf",		variables_EasyTierConf},
+		{"MihomoConf",			variables_MihomoConf},
 		{"LANGUAGE",			variables_Language},
 		{0,0}
 	};

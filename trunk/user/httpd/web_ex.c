@@ -2054,6 +2054,768 @@ static int dnsforwarder_status_hook(int eid, webs_t wp, int argc, char **argv)
 }
 #endif
 
+/* ======================================================================
+ * EasyTier 管理页支持
+ * 插入位置: web_ex.c 中 dnsforwarder_status_hook 之后 (#endif 之后, 约第 2056 行)
+ * ====================================================================== */
+
+#define ET_BIN			"/usr/bin/easytier-core"
+#define ET_CTL			"/usr/bin/easytier-start"
+#define ET_LOG			"/tmp/easytier.log"
+#define ET_RUNSH		"/tmp/easytier/run.sh"
+#define ET_COMM			"easytier-core"
+#define ET_LOG_KEEP_LINES	40
+
+/* 按 /proc/<pid>/comm 找进程, 不依赖 pidof 是否在 httpd 的 PATH 里 */
+static int
+easytier_pid(void)
+{
+	DIR *dir;
+	struct dirent *de;
+	FILE *fp;
+	char path[64], comm[32];
+	int pid = 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return 0;
+
+	while ((de = readdir(dir)) != NULL) {
+		if (!isdigit((unsigned char)de->d_name[0]))
+			continue;
+
+		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		comm[0] = 0;
+		if (fgets(comm, sizeof(comm), fp)) {
+			comm[strcspn(comm, "\r\n")] = 0;
+			fclose(fp);
+			if (!strcmp(comm, ET_COMM)) {
+				pid = atoi(de->d_name);
+				break;
+			}
+		} else {
+			fclose(fp);
+		}
+	}
+	closedir(dir);
+
+	return pid;
+}
+
+/* 进程已运行秒数: /proc/uptime - starttime/HZ, 失败返回 -1 */
+static long
+easytier_uptime(int pid)
+{
+	FILE *fp;
+	char path[64], buf[1024], *p;
+	double up = 0.0, secs;
+	unsigned long long start = 0;
+	long hz;
+	int i;
+
+	hz = sysconf(_SC_CLK_TCK);
+	if (hz <= 0)
+		hz = 100;
+
+	fp = fopen("/proc/uptime", "r");
+	if (!fp)
+		return -1;
+	if (fscanf(fp, "%lf", &up) != 1) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(buf, sizeof(buf), fp)) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	/* comm 字段带括号且可能含空格, 从最后一个 ')' 之后开始数:
+	 * 第 1 个 token 是 state(字段3), starttime 是字段22 => 第 20 个 token */
+	p = strrchr(buf, ')');
+	if (!p)
+		return -1;
+	p = strtok(p + 1, " ");
+	for (i = 1; p && i < 20; i++)
+		p = strtok(NULL, " ");
+	if (!p)
+		return -1;
+
+	start = strtoull(p, NULL, 10);
+	secs = up - (double)start / (double)hz;
+	if (secs < 0.0)
+		secs = 0.0;
+
+	return (long)secs;
+}
+
+static void
+easytier_html_escape(webs_t wp, const char *s)
+{
+	if (!s)
+		return;
+
+	for (; *s; s++) {
+		switch (*s) {
+		case '<':	fputs("&lt;", wp);	break;
+		case '>':	fputs("&gt;", wp);	break;
+		case '&':	fputs("&amp;", wp);	break;
+		case '"':	fputs("&quot;", wp);	break;
+		default:	fputc(*s, wp);		break;
+		}
+	}
+}
+
+/* 生成一份"伸手可复制"的可执行命令快照, 只用于排错/手动执行 */
+static void
+easytier_sh_arg(FILE *fp, const char *opt, const char *val)
+{
+	const char *p;
+
+	if (!val || !*val)
+		return;
+
+	fprintf(fp, " \\\n    %s '", opt);
+	for (p = val; *p; p++) {
+		if (*p == '\'')
+			fputs("'\\''", fp);
+		else
+			fputc(*p, fp);
+	}
+	fputc('\'', fp);
+}
+
+static void
+easytier_sh_arg_trim(char *s)
+{
+	char *p = s;
+	size_t n;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+	if (p != s)
+		memmove(s, p, strlen(p) + 1);
+
+	n = strlen(s);
+	while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t'))
+		s[--n] = 0;
+}
+
+/* 可重复参数: nvram 里是【空格分隔】的一串值, 拆开后每个值各占一个 argv。
+ * 空格 / 制表 / 回车 / 换行都算分隔符; 连续分隔符只算一个, 不产生空参数。
+ * 值和 easytier-start 的拆法必须一致(那边是 IFS 默认拆词 + tr -s ' ')。 */
+static void
+easytier_sh_arg_list(FILE *fp, const char *opt, const char *val)
+{
+	const char *p;
+	char item[512];
+	size_t n;
+
+	if (!val)
+		return;
+
+	p = val;
+	for (;;) {
+		while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+			p++;
+		if (!*p)
+			break;
+
+		n = 0;
+		while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+			if (n < sizeof(item) - 1)
+				item[n++] = *p;
+			p++;
+		}
+		item[n] = 0;
+
+		easytier_sh_arg_trim(item);
+		if (*item)
+			easytier_sh_arg(fp, opt, item);
+	}
+}
+
+static int
+easytier_write_runner(void)
+{
+	FILE *fp;
+
+	if (mkdir("/tmp/easytier", 0755) != 0 && errno != EEXIST)
+		return -1;
+
+	fp = fopen(ET_RUNSH, "w");
+	if (!fp)
+		return -1;
+
+	fprintf(fp,
+		"#!/bin/sh\n"
+		"# 本文件由 Web 界面自动生成, 仅供查看 / 手动执行\n"
+		"# 实际启动由 /usr/bin/easytier-start 直接读 nvram, 不依赖本文件\n\n"
+		"easytier-lite");
+
+	easytier_sh_arg(fp, "--network-name", nvram_safe_get("et_network_name"));
+	easytier_sh_arg(fp, "--network-secret", nvram_safe_get("et_network_secret"));
+	easytier_sh_arg(fp, "--ipv4", nvram_safe_get("et_ipv4"));
+	easytier_sh_arg(fp, "-p", nvram_safe_get("et_peers"));
+	easytier_sh_arg_list(fp, "-n", nvram_safe_get("et_subnets"));
+	easytier_sh_arg_list(fp, "--private-group", nvram_safe_get("et_private_groups"));
+	fputs(" &\n", fp);
+
+	fclose(fp);
+	chmod(ET_RUNSH, 0755);
+
+	return 0;
+}
+
+/* <% easytier_running(); %>  给 JS 用的 0/1 */
+static int
+easytier_running_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	websWrite(wp, "function easytier_running(){return %d;}\n", (easytier_pid() > 0) ? 1 : 0);
+	return 0;
+}
+
+/* <% easytier_status(); %>  页面里的运行状态 (PID + 运行时长) */
+static int
+easytier_status_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	int pid = easytier_pid();
+	long up;
+
+	if (pid <= 0) {
+		websWrite(wp, "<span class=\"label label-warning\">未运行</span>");
+		return 0;
+	}
+
+	websWrite(wp, "<span class=\"label label-success\">运行中</span>&nbsp;PID <b>%d</b>", pid);
+
+	up = easytier_uptime(pid);
+	if (up >= 0)
+		websWrite(wp, "&nbsp;&nbsp;已运行 %ld 天 %02ld:%02ld:%02ld",
+			up / 86400, (up % 86400) / 3600, (up % 3600) / 60, up % 60);
+
+	return 0;
+}
+
+/* <% easytier_log(); %>  日志尾部 */
+static int
+easytier_log_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	FILE *fp;
+	char buf[8193];
+	size_t n, start;
+	long sz;
+	int lines;
+	size_t i;
+
+	fp = fopen(ET_LOG, "r");
+	if (!fp) {
+		websWrite(wp, "(暂无日志: %s)", ET_LOG);
+		return 0;
+	}
+
+	if (fseek(fp, 0, SEEK_END) != 0) {
+		fclose(fp);
+		return 0;
+	}
+	sz = ftell(fp);
+	if (sz < 0) {
+		fclose(fp);
+		return 0;
+	}
+
+	if (sz > (long)sizeof(buf) - 1) {
+		if (fseek(fp, -((long)sizeof(buf) - 1), SEEK_END) != 0) {
+			fclose(fp);
+			return 0;
+		}
+		start = 1;	/* 标记: 首行可能被截断 */
+	} else {
+		fseek(fp, 0, SEEK_SET);
+		start = 0;
+	}
+
+	n = fread(buf, 1, sizeof(buf) - 1, fp);
+	fclose(fp);
+	buf[n] = 0;
+
+	/* 被截断的首行整行丢掉 */
+	if (start) {
+		char *nl = strchr(buf, '\n');
+		start = nl ? (size_t)(nl - buf) + 1 : n;
+	}
+
+	/* 只保留最后 ET_LOG_KEEP_LINES 行 */
+	lines = 0;
+	for (i = n; i > start; i--) {
+		if (buf[i - 1] == '\n') {
+			if (++lines > ET_LOG_KEEP_LINES) {
+				start = i;
+				break;
+			}
+		}
+	}
+
+	easytier_html_escape(wp, buf + start);
+
+	return 0;
+}
+
+/* <% easytier_action(); %>  由 Advanced_EasyTier_action.asp 调用 */
+static int
+easytier_action_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	int i, enabled, ok;
+	const char *err = NULL;
+
+	if (!get_login_safe()) {
+		websWrite(wp, "<script>parent.easytier_apply_done(0, '当前不是局域网/HTTPS 安全会话, 已拒绝');</script>\n");
+		return 0;
+	}
+
+	/* 此时 nvram 已由同一页面里的 <% update_variables(); %> 写入 */
+	enabled = nvram_get_int("et_enable");
+
+	if (enabled && !f_exists(ET_BIN))
+		err = "固件里没有 /usr/bin/easytier-core (编译时没开 CONFIG_FIRMWARE_INCLUDE_EASYTIER)";
+	else if (enabled && !*(nvram_safe_get("et_network_name")))
+		err = "已勾选启用, 但网络名为空: 没有改动 EasyTier";
+	else if (enabled && !*(nvram_safe_get("et_ipv4")))
+		err = "已勾选启用, 但 IPv4 地址为空: 没有改动 EasyTier";
+	else if (easytier_write_runner() != 0)
+		err = "写 /tmp/easytier/run.sh 失败: /tmp 空间不足?";
+
+	if (err) {
+		websWrite(wp, "<script>parent.easytier_apply_done(0, '%s');</script>\n", err);
+		return 0;
+	}
+
+	doSystem("%s %s", ET_CTL, enabled ? "restart" : "stop");
+
+	if (enabled) {
+		for (i = 0; i < 15 && easytier_pid() <= 0; i++)
+			usleep(200000);
+		ok = (easytier_pid() > 0);
+	} else {
+		ok = (easytier_pid() <= 0);
+	}
+
+	if (ok)
+		websWrite(wp, "<script>parent.easytier_apply_done(1, '');</script>\n");
+	else
+		websWrite(wp, "<script>parent.easytier_apply_done(0, '操作已下发, 但进程状态没有变化, 请看下面的日志');</script>\n");
+
+	return 0;
+}
+
+/* ======================================================================
+ * Mihomo 管理页支持
+ * 插入位置: web_ex.c 中 easytier_action_hook 之后 (整个 EasyTier 段落的末尾)
+ *
+ * 与 EasyTier 段落的关系:
+ *   两段代码互不依赖, 函数名各自加前缀 (easytier_ / mihomo_), 不会符号冲突。
+ *   共用的思路只有两点: 按 /proc/<pid>/comm 找进程, 以及读 /proc/<pid>/stat
+ *   算运行时长 —— 各写一份, 因为进程名不同, 合并反而更难读。
+ * ====================================================================== */
+
+#define MH_BIN			"/usr/bin/mihomo"
+#define MH_CTL			"/usr/bin/mihomo-start"
+#define MH_LOG			"/tmp/mihomo.log"
+#define MH_COMM			"mihomo"
+#define MH_LOG_KEEP_LINES	40
+#define MH_SLIM_CONF		"/etc/storage/mihomo/slim.conf"
+#define MH_SUB_FILE		"/etc/storage/mihomo/sub_url.txt"
+#define MH_FETCH_STAT		"/tmp/mihomo/.fetch_status"
+
+/* 按 /proc/<pid>/comm 找进程 —— 不依赖 pidof 是否在 httpd 的 PATH 里 */
+static int
+mihomo_pid(void)
+{
+	DIR *dir;
+	struct dirent *de;
+	FILE *fp;
+	char path[64], comm[32];
+	int pid = 0;
+
+	dir = opendir("/proc");
+	if (!dir)
+		return 0;
+
+	while ((de = readdir(dir)) != NULL) {
+		if (!isdigit((unsigned char)de->d_name[0]))
+			continue;
+
+		snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		comm[0] = 0;
+		if (fgets(comm, sizeof(comm), fp)) {
+			comm[strcspn(comm, "\r\n")] = 0;
+			if (!strcmp(comm, MH_COMM)) {
+				pid = atoi(de->d_name);
+				fclose(fp);
+				break;
+			}
+		}
+		fclose(fp);
+	}
+	closedir(dir);
+
+	return pid;
+}
+
+/* 进程已运行秒数: /proc/uptime - starttime/HZ, 失败返回 -1 */
+static long
+mihomo_uptime(int pid)
+{
+	FILE *fp;
+	char path[64], buf[1024], *p;
+	double up = 0.0, secs;
+	unsigned long long start = 0;
+	long hz;
+	int i;
+
+	hz = sysconf(_SC_CLK_TCK);
+	if (hz <= 0)
+		hz = 100;
+
+	fp = fopen("/proc/uptime", "r");
+	if (!fp)
+		return -1;
+	if (fscanf(fp, "%lf", &up) != 1) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(buf, sizeof(buf), fp)) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	/* comm 字段带括号且可能含空格, 从最后一个 ')' 之后开始数:
+	 * 第 1 个 token 是 state(字段3), starttime 是字段22 => 第 20 个 token */
+	p = strrchr(buf, ')');
+	if (!p)
+		return -1;
+	p = strtok(p + 1, " ");
+	for (i = 1; p && i < 20; i++)
+		p = strtok(NULL, " ");
+	if (!p)
+		return -1;
+
+	start = strtoull(p, NULL, 10);
+	secs = up - (double)start / (double)hz;
+	if (secs < 0.0)
+		secs = 0.0;
+
+	return (long)secs;
+}
+
+static void
+mihomo_html_escape(webs_t wp, const char *s)
+{
+	if (!s)
+		return;
+
+	for (; *s; s++) {
+		switch (*s) {
+		case '<':	fputs("&lt;", wp);	break;
+		case '>':	fputs("&gt;", wp);	break;
+		case '&':	fputs("&amp;", wp);	break;
+		case '"':	fputs("&quot;", wp);	break;
+		default:	fputc(*s, wp);		break;
+		}
+	}
+}
+
+/* 读小文件开头一行到 buf, 返回 0 表示读到了非空内容 */
+static int
+mihomo_read_line(const char *path, char *buf, int len)
+{
+	FILE *fp;
+	int n;
+
+	buf[0] = 0;
+	fp = fopen(path, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(buf, len, fp)) {
+		fclose(fp);
+		buf[0] = 0;
+		return -1;
+	}
+	fclose(fp);
+
+	buf[strcspn(buf, "\r\n")] = 0;
+	n = (int)strlen(buf);
+
+	return n > 0 ? 0 : -1;
+}
+
+/* <% mihomo_running(); %>  给 JS 用的 0/1 */
+static int
+mihomo_running_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	websWrite(wp, "function mihomo_running(){return %d;}\n", (mihomo_pid() > 0) ? 1 : 0);
+	return 0;
+}
+
+/* <% mihomo_status(); %>  页面里的运行状态 */
+static int
+mihomo_status_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	int pid = mihomo_pid();
+	long up;
+	char st[32];
+
+	if (pid <= 0) {
+		websWrite(wp, "<span class=\"label label-warning\">未运行</span>");
+		/* 拉订阅失败过就提示一下, 否则用户只看到"未运行"不知道为啥 */
+		if (mihomo_read_line(MH_FETCH_STAT, st, sizeof(st)) == 0 && !strcmp(st, "fail"))
+			websWrite(wp, "&nbsp;<span style=\"color:#c00;\">上次拉订阅失败, 看下面的日志</span>");
+		else if (mihomo_read_line(MH_FETCH_STAT, st, sizeof(st)) == 0 && !strcmp(st, "running"))
+			websWrite(wp, "&nbsp;<span style=\"color:#999;\">正在拉订阅...</span>");
+		return 0;
+	}
+
+	websWrite(wp, "<span class=\"label label-success\">运行中</span>&nbsp;PID <b>%d</b>", pid);
+
+	up = mihomo_uptime(pid);
+	if (up >= 0)
+		websWrite(wp, "&nbsp;&nbsp;已运行 %ld 天 %02ld:%02ld:%02ld",
+			up / 86400, (up % 86400) / 3600, (up % 3600) / 60, up % 60);
+
+	return 0;
+}
+
+/* <% mihomo_panel_url(); %>  只输出 URL 文本, 给 JS window.open 用 */
+static int
+mihomo_panel_url_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	const char *lan = nvram_safe_get("lan_ipaddr");
+
+	if (!lan || !*lan)
+		lan = "192.168.2.1";
+
+	websWrite(wp, "http://%s:9090/ui/", lan);
+	return 0;
+}
+
+/* <% mihomo_slim_state(); %>  订阅精简开关的当前状态 */
+static int
+mihomo_slim_state_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	char line[128];
+	int on = 0;
+
+	if (!f_exists(MH_SLIM_CONF)) {
+		websWrite(wp, "<span class=\"label\">关闭</span>"
+			"&nbsp;<span style=\"color:#999;\">没有 slim.conf</span>");
+		return 0;
+	}
+
+	/* 只认 SLIM=1 这一行, 其它行原样忽略 (和 mihomo-start 的解析保持一致) */
+	if (mihomo_read_line(MH_SLIM_CONF, line, sizeof(line)) == 0) {
+		FILE *fp = fopen(MH_SLIM_CONF, "r");
+
+		if (fp) {
+			while (fgets(line, sizeof(line), fp)) {
+				line[strcspn(line, "\r\n")] = 0;
+				if (!strncmp(line, "SLIM=", 5)) {
+					on = (line[5] == '1');
+					break;
+				}
+			}
+			fclose(fp);
+		}
+	}
+
+	if (on)
+		websWrite(wp, "<span class=\"label label-success\">开启</span>"
+			"&nbsp;<span style=\"color:#999;\">%s</span>", MH_SLIM_CONF);
+	else
+		websWrite(wp, "<span class=\"label\">关闭</span>"
+			"&nbsp;<span style=\"color:#999;\">%s 里 SLIM 不是 1</span>", MH_SLIM_CONF);
+
+	return 0;
+}
+
+/* <% mihomo_log(); %>  日志尾部 */
+static int
+mihomo_log_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	FILE *fp;
+	char buf[8193];
+	size_t n, start;
+	long sz;
+	int lines;
+	size_t i;
+
+	fp = fopen(MH_LOG, "r");
+	if (!fp) {
+		websWrite(wp, "(暂无日志: %s)", MH_LOG);
+		return 0;
+	}
+
+	if (fseek(fp, 0, SEEK_END) != 0) {
+		fclose(fp);
+		return 0;
+	}
+	sz = ftell(fp);
+	if (sz < 0) {
+		fclose(fp);
+		return 0;
+	}
+
+	if (sz > (long)sizeof(buf) - 1) {
+		if (fseek(fp, -((long)sizeof(buf) - 1), SEEK_END) != 0) {
+			fclose(fp);
+			return 0;
+		}
+		start = 1;	/* 标记: 首行可能被截断 */
+	} else {
+		fseek(fp, 0, SEEK_SET);
+		start = 0;
+	}
+
+	n = fread(buf, 1, sizeof(buf) - 1, fp);
+	fclose(fp);
+	buf[n] = 0;
+
+	if (start) {
+		char *nl = strchr(buf, '\n');
+		start = nl ? (size_t)(nl - buf) + 1 : n;
+	}
+
+	lines = 0;
+	for (i = n; i > start; i--) {
+		if (buf[i - 1] == '\n') {
+			if (++lines > MH_LOG_KEEP_LINES) {
+				start = i;
+				break;
+			}
+		}
+	}
+
+	mihomo_html_escape(wp, buf + start);
+
+	return 0;
+}
+
+/* <% mihomo_action(); %>  由 Advanced_Mihomo_action.asp 调用
+ *
+ * 此时 nvram 已由同一页面里的 <% update_variables(); %> 写好了,
+ * 包括 mh_enable / mh_autostart / mh_sub_url / mh_action。
+ *
+ * 注意 httpd 是单线程的: 这里一旦长时间阻塞, 整个 Web 界面都会卡住。
+ * 所以"更新订阅"(要联网, 可能几十秒) 走后台, 只在前台轮询状态文件,
+ * 最多等 MH_WAIT_UPDATE 个 200ms; 超时就告诉用户"后台还在跑, 稍后刷新"。
+ */
+static int
+mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	int i, enabled, ok, do_update;
+	const char *err = NULL;
+	const char *act;
+	char st[32];
+
+	if (!get_login_safe()) {
+		websWrite(wp, "<script>parent.mihomo_apply_done(0, '当前不是局域网/HTTPS 安全会话, 已拒绝');</script>\n");
+		return 0;
+	}
+
+	enabled = nvram_get_int("mh_enable");
+
+	act = nvram_safe_get("mh_action");
+	do_update = (act && !strcmp(act, "update")) ? 1 : 0;
+
+	if (enabled && !f_exists(MH_BIN))
+		err = "固件里没有 /usr/bin/mihomo (编译时没开 CONFIG_FIRMWARE_INCLUDE_MIHOMO)";
+	else if (enabled && !*(nvram_safe_get("mh_sub_url")) && !f_exists(MH_SUB_FILE))
+		err = "已勾选启用, 但订阅地址为空: 没有改动 mihomo";
+
+	if (err) {
+		websWrite(wp, "<script>parent.mihomo_apply_done(0, '%s');</script>\n", err);
+		return 0;
+	}
+
+	/* mh_action 是个一次性开关, 用完复位, 免得下次"应用"又误触发拉订阅 */
+	nvram_set("mh_action", "apply");
+
+	if (!enabled) {
+		doSystem("%s stop", MH_CTL);
+		ok = (mihomo_pid() <= 0);
+		websWrite(wp, "<script>parent.mihomo_apply_done(%d, '%s');</script>\n",
+			ok ? 1 : 0, ok ? "" : "停止已下发, 但进程还在, 看下面的日志");
+		return 0;
+	}
+
+	if (do_update) {
+		/* 后台拉订阅; update 分支会写 .fetch_status */
+		doSystem("%s update >/dev/null 2>&1 &", MH_CTL);
+
+		/* 最多等 30 秒 (150 x 200ms)。wget 超时是 20 秒, 再加启动时间 */
+		for (i = 0; i < 150; i++) {
+			if (mihomo_read_line(MH_FETCH_STAT, st, sizeof(st)) == 0) {
+				if (!strcmp(st, "ok") || !strcmp(st, "fail"))
+					break;
+			}
+			usleep(200000);
+		}
+
+		if (mihomo_read_line(MH_FETCH_STAT, st, sizeof(st)) == 0 && !strcmp(st, "ok")) {
+			/* 配置重建完了, 再等进程真正起来 */
+			for (i = 0; i < 25 && mihomo_pid() <= 0; i++)
+				usleep(200000);
+			ok = (mihomo_pid() > 0);
+			websWrite(wp, "<script>parent.mihomo_apply_done(%d, '%s');</script>\n",
+				ok ? 1 : 0, ok ? "" : "配置已更新, 但进程没起来, 看下面的日志");
+			return 0;
+		}
+
+		if (mihomo_read_line(MH_FETCH_STAT, st, sizeof(st)) == 0 && !strcmp(st, "fail"))
+			websWrite(wp, "<script>parent.mihomo_apply_done(0, '拉订阅失败: 检查订阅地址/网络, 详情见下面的日志');</script>\n");
+		else
+			websWrite(wp, "<script>parent.mihomo_apply_done(0, '订阅仍在后台下载, 请等 10-30 秒后手动刷新本页看日志');</script>\n");
+
+		return 0;
+	}
+
+	/* 普通"应用": 只保存参数并重启, 不联网、不重建配置 */
+	doSystem("%s restart", MH_CTL);
+
+	for (i = 0; i < 15 && mihomo_pid() <= 0; i++)
+		usleep(200000);
+
+	ok = (mihomo_pid() > 0);
+
+	if (ok)
+		websWrite(wp, "<script>parent.mihomo_apply_done(1, '');</script>\n");
+	else
+		websWrite(wp, "<script>parent.mihomo_apply_done(0, '重启已下发, 但进程没起来。首次使用请先点“更新订阅”拉一次配置, 或看下面的日志');</script>\n");
+
+	return 0;
+}
+
+
 static int
 ej_detect_internet_hook(int eid, webs_t wp, int argc, char **argv)
 {
@@ -4136,6 +4898,18 @@ struct ej_handler ej_handlers[] =
 	{ "openssl_util_hook", openssl_util_hook},
 	{ "openvpn_srv_cert_hook", openvpn_srv_cert_hook},
 	{ "openvpn_cli_cert_hook", openvpn_cli_cert_hook},
+	/* EasyTier 管理页 */
+	{ "easytier_running",		easytier_running_hook},
+	{ "easytier_status",		easytier_status_hook},
+	{ "easytier_log",		easytier_log_hook},
+	{ "easytier_action",		easytier_action_hook},
+	/* Mihomo 管理页 */
+	{ "mihomo_running",		mihomo_running_hook},
+	{ "mihomo_status",		mihomo_status_hook},
+	{ "mihomo_panel_url",		mihomo_panel_url_hook},
+	{ "mihomo_slim_state",	mihomo_slim_state_hook},
+	{ "mihomo_log",		mihomo_log_hook},
+	{ "mihomo_action",		mihomo_action_hook},
 	{ NULL, NULL }
 };
 

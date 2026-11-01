@@ -1,0 +1,181 @@
+#!/bin/sh
+#
+# easytier-start -- EasyTier 进程控制 (Padavan / hanwckf 系)
+#
+# 安装位置: /usr/bin/easytier-start  (由 trunk/user/easytier/Makefile 的 romfs 目标编入)
+#
+# 用法:
+#   easytier-start start      启动 (已在跑则跳过)
+#   easytier-start stop       停止
+#   easytier-start restart    重启 (停旧 -> 起新)
+#   easytier-start autostart  仅当 nvram et_autostart=1 时启动 (开机钩子调用)
+#   easytier-start status     打印状态
+#
+# 参数全部从 nvram 读 (et_* 变量), 由 Web 界面「高级设置 -> 自定义设置 -> EasyTier」写入。
+# 这里刻意不 eval、不拼命令字符串: 全部走位置参数, 值里的单引号/中文/# 都不会出事。
+#
+# -p / -n / --private-group 都是"可重复参数", nvram 里是【空格分隔】的一串值:
+#   et_peers          = tcp://a:11010 tcp://b:11010
+#   et_subnets        = 192.168.2.0/24 192.168.3.0/24
+#   et_private_groups = 朋友网络#朋友密钥 公司#另一个密钥
+#
+#   !! 单个值内部不能含空格。脚本就是按空格拆词的, 值里有空格必然被拆成两个参数:
+#      写成 "公司 内网#密钥" 会被拆成 "--private-group 公司" 和 "--private-group 内网#密钥",
+#      前者密钥错, 后者成了另一组。这是"用空格当分隔符"的固有代价, 页面上已提示用户。
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+
+# 关掉路径展开(glob)。下面 for v in $VAR 是"不带引号的展开", 会顺带做 glob,
+# 值里出现 * ? [ 就会被当通配符去匹配当前目录的文件名, 参数被悄悄改掉。
+# 本脚本任何地方都不需要 glob, 所以全局关闭最省事。
+set -f
+
+BIN=/usr/bin/easytier-core
+NVRAM=/usr/sbin/nvram
+LOG=/tmp/easytier.log
+RUNDIR=/tmp/easytier
+LOG_MAX=65536		# 字节数, 超过就截断 (/tmp 是内存, 128MB 机器别留大日志)
+LOG_KEEP=300		# 截断后保留的最后行数
+
+log() {
+	logger -t easytier "$*" 2>/dev/null
+	echo "$*"
+}
+
+get() {
+	$NVRAM get "$1" 2>/dev/null
+}
+
+running() {
+	pidof easytier-core >/dev/null 2>&1
+}
+
+# 把一个"空格分隔的多值"清洗成规范形式:
+#   去掉 \r (Windows 换行残留) -> 制表符/换行统一成空格 -> 连续空格压成一个
+# 首尾空格不用管: 后面 for v in $X 靠 IFS 拆词, 前导/尾随空白天然被忽略。
+et_norm() {
+	printf '%s' "$1" | tr -d '\r' | tr '\t\n' '  ' | tr -s ' '
+}
+
+do_stop() {
+	running || return 0
+
+	killall easytier-core 2>/dev/null
+
+	i=0
+	while running; do
+		i=$((i + 1))
+		[ $i -ge 5 ] && break
+		sleep 1
+	done
+
+	if running; then
+		killall -9 easytier-core 2>/dev/null
+		sleep 1
+	fi
+
+	if running; then
+		log "EasyTier 停止失败"
+		return 1
+	fi
+
+	log "EasyTier 已停止"
+	return 0
+}
+
+do_start() {
+	NN=$(et_norm "$(get et_network_name)")
+	NS=$(et_norm "$(get et_network_secret)")
+	IP=$(et_norm "$(get et_ipv4)")
+
+	ET_PEERS=$(et_norm "$(get et_peers)")
+	ET_SUBNETS=$(et_norm "$(get et_subnets)")
+	ET_PGRPS=$(et_norm "$(get et_private_groups)")
+
+	[ -x "$BIN" ] || { log "错误: 找不到 $BIN"; return 1; }
+	[ -n "$NN" ] || { log "错误: 网络名 et_network_name 为空, 拒绝启动"; return 2; }
+	[ -n "$IP" ] || { log "错误: IPv4 地址 et_ipv4 为空, 拒绝启动"; return 2; }
+
+	set --
+	set -- "$@" --network-name "$NN"
+	[ -n "$NS" ] && set -- "$@" --network-secret "$NS"
+	set -- "$@" --ipv4 "$IP"
+
+	# ---- 可重复参数: 一个值一个开关 ----
+	# $ET_xxx 故意【不加引号】: 加了引号整串只算一个 argv, 就不是"可重复"了。
+	# 拆出来的 $v 拼进 argv 时【必须加双引号】: 否则值里的 # 会被当成注释开头截断,
+	# 空格会被再拆一次, * 会被 glob (已用 set -f 兜住)。
+	for v in $ET_PEERS; do
+		[ -n "$v" ] && set -- "$@" -p "$v"
+	done
+
+	for v in $ET_SUBNETS; do
+		[ -n "$v" ] && set -- "$@" -n "$v"
+	done
+
+	for v in $ET_PGRPS; do
+		[ -n "$v" ] && set -- "$@" --private-group "$v"
+	done
+
+	mkdir -p "$RUNDIR" || { log "错误: 无法创建 $RUNDIR"; return 1; }
+	cd "$RUNDIR" || return 1
+
+	# 日志截断: 按行截, 避免留下半行
+	if [ -f "$LOG" ]; then
+		sz=$(wc -c <"$LOG" 2>/dev/null)
+		if [ -n "$sz" ] && [ "$sz" -gt $LOG_MAX ]; then
+			tail -n $LOG_KEEP "$LOG" >"$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG"
+		fi
+	fi
+
+	# 这行只为排错方便: $* 用空格连接, 值里本来就不该有空格, 所以不失真
+	log "启动: $BIN $*"
+	nohup "$BIN" "$@" </dev/null >>"$LOG" 2>&1 &
+
+	sleep 2
+
+	if ! running; then
+		log "EasyTier 启动失败, 日志末尾:"
+		tail -n 5 "$LOG" 2>/dev/null
+		return 1
+	fi
+
+	log "EasyTier 已启动 (pid $(pidof easytier-core))"
+	return 0
+}
+
+case "$1" in
+	start)
+		if running; then
+			log "EasyTier 已在运行 (pid $(pidof easytier-core))"
+			exit 0
+		fi
+		do_start
+		;;
+	stop)
+		do_stop
+		;;
+	restart)
+		do_stop
+		do_start
+		;;
+	autostart)
+		[ "$(get et_autostart)" = "1" ] || exit 0
+		running && exit 0
+		do_start
+		;;
+	status)
+		if running; then
+			echo "running pid $(pidof easytier-core)"
+		else
+			echo "stopped"
+		fi
+		;;
+	*)
+		echo "用法: $0 {start|stop|restart|autostart|status}"
+		exit 1
+		;;
+esac
+
+exit $?

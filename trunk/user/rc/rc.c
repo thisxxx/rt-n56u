@@ -935,6 +935,12 @@ init_router(void)
 	}
 	// system ready
 	system("/etc/storage/started_script.sh &");
+
+	/* 代理/组网组件的开机自启: 各自读 nvram 开关, 关着的时候零开销 */
+	if (nvram_get_int("et_autostart") == 1)
+		system("/usr/bin/easytier-start autostart &");
+	if (nvram_get_int("mh_autostart") == 1)
+		system("/usr/bin/mihomo-start autostart &");
 }
 
 /*

@@ -24,6 +24,7 @@ romfs:
 	# -S: 禁止 romfs-inst.sh 对二进制做 strip (Go 二进制 strip 有风险且无意义)
 	# -p +x: 显式补上可执行权限
 	$(ROMFSINST) -S -p +x $(THISDIR)/easytier-core /usr/bin/easytier-core
+	$(ROMFSINST) -S -p +x $(THISDIR)/easytier-start /usr/bin/easytier-start
 
 clean:
 	@true
