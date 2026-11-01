@@ -436,7 +436,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: K2P-mihomo-${{ inputs.variant || 'full' }}-et${{ env.ET_VER }}
-          name: K2P mihomo 固件（${{ inputs.variant || 'full' }} / easytier v${{ env.ET_VER }}）
+          name: K2P 固件（内置mihomo ${{ inputs.variant || 'full' }} + easytier v${{ env.ET_VER }}）
           body: |
             斐讯 K2P A1/A2（MT7621A + MT7615D，16MB NOR / 128MB RAM）Padavan 固件，
             内置 **未压缩** mihomo、easytier-lite **v${{ env.ET_VER }}** 与 yacd 面板静态资源（/usr/share/mihomo/ui）。
