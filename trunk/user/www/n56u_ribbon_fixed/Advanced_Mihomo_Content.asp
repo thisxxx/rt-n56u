@@ -103,6 +103,26 @@ function applyRule(){
 	submit_form('apply');
 }
 
+/* 保存后处理脚本: 先落盘, 有变动时后台会顺带重拉一次订阅 */
+function save_sed(){
+	if (!login_safe()){
+		alert('当前不是局域网/HTTPS 安全会话，不允许修改 Mihomo');
+		return;
+	}
+	var t = document.form.mh_sed_text;
+	if (t.value.length > 8192){
+		alert('脚本太长（' + t.value.length + ' 字节），上限 8192 字节。');
+		return;
+	}
+	showLoading();
+	document.form.mh_sed_save.value = '1';
+	document.form.mh_action.value = 'apply';
+	document.form.action_mode.value = " Apply ";
+	document.form.current_page.value = "Advanced_Mihomo_Content.asp";
+	document.form.next_page.value = "";
+	document.form.submit();
+}
+
 function updateSub(){
 	submit_form('update');
 }
@@ -188,6 +208,7 @@ function open_panel(){
     <input type="hidden" name="action_mode" value="">
     <input type="hidden" name="action_script" value="">
     <input type="hidden" name="mh_action" value="apply">
+    <input type="hidden" name="mh_sed_save" value="0">
 
     <div class="container-fluid">
         <div class="row-fluid">
@@ -353,6 +374,26 @@ function open_panel(){
                                         </tr>
 
                                         <tr>
+                                            <th>订阅后处理<br><span style="font-weight: normal; color: #999;">my_sed.sh</span></th>
+                                            <td>
+                                                <div style="color: #999; margin-bottom: 6px;">
+                                                    <b>与上面的精简开关无关</b>：精简关着也照样执行。执行顺序在精简之后，
+                                                    所以这里改的是“精简后的结果”。每次拉完订阅自动跑一次。
+                                                    脚本里用 <code>$1</code> 拿配置文件路径（<code>/tmp/mihomo/config.yaml</code>）。
+                                                </div>
+                                                <textarea name="mh_sed_text" id="mh_sed_text" rows="10" wrap="off" spellcheck="false"
+                                                          maxlength="8192" placeholder="# 例: 追加一条自定义分流规则&#10;#  sed -i '/^rules:/a\\  - DOMAIN-SUFFIX,example.com,PROXY' &quot;$1&quot;"
+                                                          style="width: 96%; font-family: 'Courier New', monospace; font-size: 12px;"><% mihomo_sed_get(); %></textarea>
+                                                <div style="margin-top: 6px;">
+                                                    <button class="btn btn-mini btn-primary" type="button" onclick="save_sed();">保存脚本并生效</button>
+                                                    <span style="margin-left: 8px; color: #999;">
+                                                        保存即落盘（重启不丢），有改动会自动重拉一次订阅让改动立刻生效；清空后保存 = 关闭钩子。
+                                                    </span>
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
                                             <th colspan="2" style="background-color: #E3E3E3;">运行状态</th>
                                         </tr>
 
@@ -396,7 +437,8 @@ mihomo-start fakeip on|off|status DNS fake-ip 模式开关 (on=假 IP, off=真�
 mihomo-start autostart     仅在 mh_autostart=1 时启动 (开机钩子调用)</pre>
                                         <div style="margin-top: 6px; color: #777;">
                                             订阅地址两处都认，<b>页面里的优先</b>：nvram <code>mh_sub_url</code> &gt; <code>/etc/storage/mihomo/sub_url.txt</code>。
-                                            自定义 sed 钩子放在 <code>/etc/storage/mihomo/my_sed.sh</code>，每次拉完订阅自动执行，失败会回滚。
+                                            自定义 sed 钩子可直接在上面的文本框里改（存到 <code>/etc/storage/mihomo/my_sed.sh</code>，保存时自动落盘），
+                                            每次拉完订阅自动执行；执行顺序在精简之后，与精简开关无关。
                                         </div>
                                     </div>
 

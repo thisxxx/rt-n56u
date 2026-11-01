@@ -2438,6 +2438,9 @@ easytier_action_hook(int eid, webs_t wp, int argc, char **argv)
 #define MH_FETCH_STAT		"/tmp/mihomo/.fetch_status"
 /* mihomo-start 写的配置来源标记: normal=真实订阅 / fallback=内置兜底 */
 #define MH_MODE			"/tmp/mihomo/.mode"
+/* 订阅后处理脚本: 每次拉完订阅由 mihomo-start 执行, 与精简开关无关 */
+#define MH_SED_FILE		"/etc/storage/mihomo/my_sed.sh"
+#define MH_SED_MAX		8192
 
 /* 按 /proc/<pid>/comm 找进程 —— 不依赖 pidof 是否在 httpd 的 PATH 里 */
 static int
@@ -2702,6 +2705,127 @@ mihomo_dns_mode_changed(void)
 	return cur != (nvram_get_int("mh_fakeip") == 1);
 }
 
+/* ================= 订阅后处理脚本 (my_sed.sh) =================
+ * 面板上的文本框直接编辑 /etc/storage/mihomo/my_sed.sh:
+ *   读  → mihomo_sed_get_hook 把文件内容转义后吐进 textarea
+ *   写  → mihomo_sed_save 先把 CR 去掉统一成 LF, 和现有文件一致就不动 flash,
+ *         真变了才写盘并 mtd_storage.sh save (/etc/storage 不落盘重启就丢)
+ * 内容走 POST 字段 mh_sed_text, 不进 nvram —— 8KB 塞 nvram 会把 32KB 的 nvram 挤爆。 */
+
+/* 读文件并去掉 \r, 返回字节数; 文件不存在返回 -1; 超出缓冲返回 -2 */
+static int
+mihomo_read_norm(const char *path, char *buf, int sz)
+{
+	FILE *fp;
+	int n = 0, c;
+
+	if (!(fp = fopen(path, "r")))
+		return -1;
+	while ((c = fgetc(fp)) != EOF) {
+		if (c == '\r')
+			continue;
+		if (n >= sz - 1) {
+			fclose(fp);
+			return -2;
+		}
+		buf[n++] = (char)c;
+	}
+	fclose(fp);
+	buf[n] = 0;
+	return n;
+}
+
+/* 返回 1=内容有变动且已写盘, 0=内容没变, -1=写失败/超长 */
+static int
+mihomo_sed_save(const char *txt)
+{
+	char *old, *norm;
+	const char *p;
+	int len, n, fd, rc;
+	ssize_t w;
+
+	if (!txt)
+		return 0;
+	len = (int)strlen(txt);
+	if (len > MH_SED_MAX)
+		return -1;
+
+	/* 8KB 级别的缓冲走堆, 别压在 httpd 线程栈上 */
+	old = malloc(MH_SED_MAX + 2);
+	norm = malloc(len + 2);
+	if (!old || !norm) {
+		free(old);
+		free(norm);
+		return -1;
+	}
+
+	/* 统一成 LF, 并保证末尾有换行 (shell 脚本末尾缺换行容易出怪问题) */
+	for (n = 0, p = txt; *p; p++) {
+		if (*p == '\r')
+			continue;
+		norm[n++] = *p;
+	}
+	if (n > 0 && norm[n - 1] != '\n')
+		norm[n++] = '\n';
+	norm[n] = 0;
+
+	/* 和现行文件逐字节相同就不写: 免得每次点“应用”都擦一次 flash */
+	if (mihomo_read_norm(MH_SED_FILE, old, MH_SED_MAX + 2) == n && !strcmp(old, norm))
+		rc = 0;
+	else if (n == 0) {
+		/* 清空 = 关闭钩子 */
+		unlink(MH_SED_FILE);
+		doSystem("/sbin/mtd_storage.sh save >/dev/null 2>&1");
+		rc = 1;
+	} else {
+		rc = -1;
+		doSystem("mkdir -p /etc/storage/mihomo");
+		fd = open(MH_SED_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0744);
+		if (fd >= 0) {
+			w = write(fd, norm, n);
+			close(fd);
+			if (w == n) {
+				doSystem("chmod 744 %s", MH_SED_FILE);
+				doSystem("/sbin/mtd_storage.sh save >/dev/null 2>&1");
+				rc = 1;
+			}
+		}
+	}
+
+	free(old);
+	free(norm);
+	return rc;
+}
+
+/* <% mihomo_sed_get(); %>  把脚本内容填进 textarea (必须转义, 否则 </textarea> 会截断) */
+static int
+mihomo_sed_get_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	char *buf;
+	const char *p;
+	int n;
+
+	if (!(buf = malloc(MH_SED_MAX + 2)))
+		return 0;
+	n = mihomo_read_norm(MH_SED_FILE, buf, MH_SED_MAX + 2);
+	if (n <= 0) {
+		free(buf);
+		return 0;
+	}
+
+	for (p = buf; *p; p++) {
+		switch (*p) {
+		case '<':  websWrite(wp, "&lt;");   break;
+		case '>':  websWrite(wp, "&gt;");   break;
+		case '&':  websWrite(wp, "&amp;");  break;
+		case '"':  websWrite(wp, "&quot;"); break;
+		default:   websWrite(wp, "%c", *p); break;
+		}
+	}
+	free(buf);
+	return 0;
+}
+
 /* <% mihomo_slim_state(); %>  订阅精简开关的当前状态 */
 static int
 mihomo_slim_state_hook(int eid, webs_t wp, int argc, char **argv)
@@ -2812,7 +2936,8 @@ mihomo_log_hook(int eid, webs_t wp, int argc, char **argv)
 static int
 mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 {
-	int i, enabled, ok, do_update;
+	int i, enabled, ok, do_update, sed_rc;
+	const char *sed_flag;
 	const char *err = NULL;
 	const char *act;
 	char st[32];
@@ -2827,6 +2952,9 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 	act = nvram_safe_get("mh_action");
 	do_update = (act && !strcmp(act, "update")) ? 1 : 0;
 
+	/* textarea 里的后处理脚本: 只有点了“保存脚本”才会带上这个标记 */
+	sed_flag = websGetVar(wp, "mh_sed_save", NULL);
+
 	/* fake-ip 开关和现行配置不一致 => restart 不够, 升级成一次重建 */
 	if (!do_update && mihomo_dns_mode_changed())
 		do_update = 1;
@@ -2834,6 +2962,23 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 	/* 订阅精简开关变了 => 先把 slim.conf 对齐, 再重建配置才生效 */
 	if (mihomo_slim_changed()) {
 		doSystem("%s slim %s", MH_CTL, nvram_get_int("mh_slim") ? "on" : "off");
+		do_update = 1;
+	}
+
+	/* 面板上点了“保存脚本”: 只有显式提交这个标记才写文件,
+	 * 避免普通“应用”把文本框里的旧内容覆盖到刚在 SSH 里改过的文件上 */
+	if (sed_flag && !strcmp(sed_flag, "1")) {
+		sed_rc = mihomo_sed_save(websGetVar(wp, "mh_sed_text", ""));
+		if (sed_rc < 0) {
+			websWrite(wp, "<script>parent.mihomo_apply_done(0, '%s');</script>\n",
+				"脚本没有保存: 内容超过 8192 字节, 或 /etc/storage 写不进去");
+			return 0;
+		}
+		if (sed_rc == 0) {
+			/* 内容没变: 不用重建, 直接回报成功 (点一次“保存”不白拉一次订阅) */
+			websWrite(wp, "<script>parent.mihomo_apply_done(1, '');</script>\n");
+			return 0;
+		}
 		do_update = 1;
 	}
 
@@ -4998,6 +5143,7 @@ struct ej_handler ej_handlers[] =
 	{ "mihomo_status",		mihomo_status_hook},
 	{ "mihomo_panel_url",		mihomo_panel_url_hook},
 	{ "mihomo_slim_state",	mihomo_slim_state_hook},
+	{ "mihomo_sed_get",		mihomo_sed_get_hook},
 	{ "mihomo_log",		mihomo_log_hook},
 	{ "mihomo_action",		mihomo_action_hook},
 	{ NULL, NULL }
