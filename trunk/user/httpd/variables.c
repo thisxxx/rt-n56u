@@ -967,6 +967,7 @@
 			{"mh_enable", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_autostart", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_sub_url", "", NULL, EVM_BLOCK_UNSAFE},
+			{"mh_fakeip", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_action", "", NULL, EVM_BLOCK_UNSAFE},
 			{0,0,0,0}
 		};

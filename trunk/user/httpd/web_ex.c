@@ -2626,6 +2626,30 @@ mihomo_panel_url_hook(int eid, webs_t wp, int argc, char **argv)
 	return 0;
 }
 
+/* fake-ip 开关 (nvram mh_fakeip) 与 /tmp 里现行配置的 enhanced-mode 是否不一致。
+ * restart 沿用旧 CFG, 模式变了必须走 update 重建配置 —— 此时"应用"按钮
+ * 自动升级成一次"更新订阅"。读不到配置文件返回 0 (不触发)。 */
+static int
+mihomo_dns_mode_changed(void)
+{
+	FILE *fp;
+	char line[128];
+	int cur = 0;	/* 0=redir-host, 1=fake-ip */
+
+	fp = fopen("/tmp/mihomo/config.yaml", "r");
+	if (!fp)
+		return 0;
+	while (fgets(line, sizeof(line), fp)) {
+		char *p = strstr(line, "enhanced-mode:");
+		if (p) {
+			cur = (strstr(p, "fake-ip") != NULL);
+			break;
+		}
+	}
+	fclose(fp);
+	return cur != (nvram_get_int("mh_fakeip") == 1);
+}
+
 /* <% mihomo_slim_state(); %>  订阅精简开关的当前状态 */
 static int
 mihomo_slim_state_hook(int eid, webs_t wp, int argc, char **argv)
@@ -2753,6 +2777,10 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 
 	act = nvram_safe_get("mh_action");
 	do_update = (act && !strcmp(act, "update")) ? 1 : 0;
+
+	/* fake-ip 开关和现行配置不一致 => restart 不够, 升级成一次重建 */
+	if (!do_update && mihomo_dns_mode_changed())
+		do_update = 1;
 
 	if (enabled && !f_exists(MH_BIN))
 		err = "固件里没有 /usr/bin/mihomo (编译时没开 CONFIG_FIRMWARE_INCLUDE_MIHOMO)";

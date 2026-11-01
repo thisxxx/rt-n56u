@@ -33,6 +33,7 @@ function initial(){
 
 	init_itoggle('mh_enable');
 	init_itoggle('mh_autostart');
+	init_itoggle('mh_fakeip');
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -219,6 +220,22 @@ function open_panel(){
                                         </tr>
 
                                         <tr>
+                                            <th>DNS fake-ip 模式<br><span style="font-weight: normal; color: #999;">默认关</span></th>
+                                            <td>
+                                                <div class="main_itoggle">
+                                                    <div id="mh_fakeip_on_of">
+                                                        <input type="checkbox" id="mh_fakeip_fake" <% nvram_match_x("", "mh_fakeip", "1", "value=1 checked"); %><% nvram_match_x("", "mh_fakeip", "0", "value=0"); %>>
+                                                    </div>
+                                                </div>
+                                                <div style="position: absolute; margin-left: -10000px;">
+                                                    <input type="radio" value="1" name="mh_fakeip" id="mh_fakeip_1" <% nvram_match_x("", "mh_fakeip", "1", "checked"); %>><#checkbox_Yes#>
+                                                    <input type="radio" value="0" name="mh_fakeip" id="mh_fakeip_0" <% nvram_match_x("", "mh_fakeip", "0", "checked"); %>><#checkbox_No#>
+                                                </div>
+                                                <span style="color: #999; margin-left: 8px;">开=客户端解析到 198.18.x.x 假 IP, 域名规则匹配最准; 切换会重建配置并重启 (点“更新订阅”或“应用”生效)</span>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
                                             <th colspan="2" style="background-color: #E3E3E3;">配置</th>
                                         </tr>
 
@@ -301,6 +318,7 @@ mihomo-start restart       重启 (不重新拉订阅)
 mihomo-start stop          停止
 mihomo-start status        看进程状态
 mihomo-start slim on|off|status   订阅精简开关
+mihomo-start fakeip on|off|status DNS fake-ip 模式开关 (on=假 IP, off=真实 IP)
 mihomo-start autostart     仅在 mh_autostart=1 时启动 (开机钩子调用)</pre>
                                         <div style="margin-top: 6px; color: #777;">
                                             订阅地址两处都认，<b>页面里的优先</b>：nvram <code>mh_sub_url</code> &gt; <code>/etc/storage/mihomo/sub_url.txt</code>。

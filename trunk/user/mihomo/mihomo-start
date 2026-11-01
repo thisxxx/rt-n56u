@@ -10,6 +10,9 @@
 #   mihomo-start stop       停止进程并清理 iptables 规则
 #   mihomo-start et-start   只启动 EasyTier (二进制和配置都在才生效)
 #   mihomo-start et-stop    只停止 EasyTier
+#   mihomo-start fakeip     DNS 模式开关: on|off|status (存 nvram, 重启不丢)
+#                           on=客户端解析到 198.18.x.x 假 IP, 域名规则 100% 精准;
+#                           off=redir-host 真实 IP (默认); 切换会重建配置并重启
 #
 # ============ 关于内存 (重要) ============
 #
@@ -97,6 +100,16 @@ MARK=1               # fwmark
 RT_TABLE=100         # 策略路由表号
 
 log() { logger -t "【mihomo】" "$*"; echo "mihomo: $*"; }
+
+# DNS 模式: fake-ip 开关 (nvram mh_fakeip, 1=fake-ip / 缺省 redir-host)
+# 注意: 切模式必须重建配置 (restart 沿用旧 CFG), 所以 fakeip 子命令走 update 流程
+dns_mode() {
+	[ "$(nvram get mh_fakeip 2>/dev/null)" = "1" ] && echo "fake-ip" || echo "redir-host"
+}
+
+# fake-ip 模式下不让这些域名拿到假 IP (内网发现/NTP/IOT 会对假 IP 敏感)
+# 两处引用: 订阅无 dns 段时的 flow 行插入 + 块格式 dns 段的补插
+FAKEIP_FILTER="*.lan', '*.local', '+.local', 'time.windows.com', 'time.apple.com', 'time.gstatic.com', '+.pool.ntp.org', '+.ntp.org', '+.market.xiaomi.com"
 
 # 统计 rules 段里的规则条数
 count_rules() {
@@ -255,7 +268,9 @@ external-ui: /usr/share/mihomo/ui
 dns:
   enable: true
   listen: 0.0.0.0:$DNS_PORT
-  enhanced-mode: redir-host
+  enhanced-mode: $(dns_mode)
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter: ['$FAKEIP_FILTER']
   nameserver:
     - 223.5.5.5
     - 119.29.29.29
@@ -314,8 +329,18 @@ do_fetch() {
 	grep -q "^mixed-port:"  "$CFG_NEW" || sed -i "1i mixed-port: $HTTP_PORT"  "$CFG_NEW"
 	grep -q "^redir-port:"  "$CFG_NEW" || sed -i "1i redir-port: $PROXY_PORT"  "$CFG_NEW"
 	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $PROXY_PORT" "$CFG_NEW"
-	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向
-	grep -q "^dns:" "$CFG_NEW" || sed -i "1i dns: { enable: true, listen: 0.0.0.0:$DNS_PORT, enhanced-mode: redir-host }" "$CFG_NEW"
+	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向; 模式由 mh_fakeip 开关决定
+	DNS_MODE=$(dns_mode)
+	if grep -q "^dns:" "$CFG_NEW"; then
+		# 订阅自带 dns 段 (块格式): 行内替换 enhanced-mode, fake-ip 时补 filter
+		sed -i "s/enhanced-mode:[ \t]*[a-zA-Z-]*/enhanced-mode: $DNS_MODE/" "$CFG_NEW"
+		if [ "$DNS_MODE" = "fake-ip" ] && ! grep -q "fake-ip-filter:" "$CFG_NEW"; then
+			sed -i "/^dns:/a\\  fake-ip-filter: ['$FAKEIP_FILTER']" "$CFG_NEW"
+		fi
+	else
+		# 订阅没有 dns 段: 顶部插入单行 flow 配置 (fake-ip-filter 在 redir-host 下被忽略, 无害)
+		sed -i "1i dns: { enable: true, listen: 0.0.0.0:$DNS_PORT, enhanced-mode: $DNS_MODE, fake-ip-range: 198.18.0.1/16, fake-ip-filter: ['$FAKEIP_FILTER'] }" "$CFG_NEW"
+	fi
 	# geo 自动更新会定期拉全量库(8+4 MiB), 128MB 机器扛不住, 统一关掉
 	grep -q "^geo-auto-update:" "$CFG_NEW" || sed -i "1i geo-auto-update: false" "$CFG_NEW"
 
@@ -482,22 +507,23 @@ do_stop() {
 	fw_stop
 }
 
+# 拉订阅 + 重建配置 + 重启 (供 update / fakeip 切换共用)
+run_update() {
+	mkdir -p "$RUNDIR"
+	printf 'running' > "$FETCH_STAT" 2>/dev/null
+	if do_fetch; then
+		do_stop
+		sleep 1
+		do_start
+		printf 'ok' > "$FETCH_STAT" 2>/dev/null
+	else
+		printf 'fail' > "$FETCH_STAT" 2>/dev/null
+		return 1
+	fi
+}
+
 case "$1" in
-	update)
-		# 状态文件给 Web 页面轮询用: 页面点"更新订阅"后是后台跑的,
-		# 靠这个文件判断到底成没成, 而不是靠猜进程在不在
-		mkdir -p "$RUNDIR"
-		printf 'running' > "$FETCH_STAT" 2>/dev/null
-		if do_fetch; then
-			do_stop
-			sleep 1
-			do_start
-			printf 'ok' > "$FETCH_STAT" 2>/dev/null
-		else
-			printf 'fail' > "$FETCH_STAT" 2>/dev/null
-			exit 1
-		fi
-		;;
+	update) run_update ;;
 	restart) do_stop; sleep 1; do_start ;;
 	stop)    do_stop ;;
 	autostart)
@@ -517,6 +543,7 @@ case "$1" in
 	status)
 		if pidof mihomo >/dev/null 2>&1; then
 			echo "running pid $(pidof mihomo)"
+			echo "DNS 模式: $(dns_mode)"
 			case "$(cat "$MODE_STAT" 2>/dev/null)" in
 				fallback) echo "配置: 内置兜底 (订阅未拉到, 流量未接管)" ;;
 				*)        echo "配置: 正常订阅" ;;
@@ -524,6 +551,40 @@ case "$1" in
 		else
 			echo "stopped"
 		fi
+		;;
+	fakeip)
+		# fake-ip 开关: on/off 写 nvram mh_fakeip 并立刻重建配置生效。
+		# 不能只 restart: do_start 看到 /tmp 有旧 CFG 会直接沿用, 模式不会变。
+		# 走 update 失败时 (网络断) 配置和进程原样保留, 开关下次再切。
+		case "$2" in
+			on|off)
+				nvram set mh_fakeip=$([ "$2" = on ] && echo 1 || echo 0)
+				nvram commit >/dev/null 2>&1
+				log "fake-ip 已$([ "$2" = on ] && echo 开启 || echo 关闭), 重建配置中..."
+				if run_update; then
+					# 切模式后客户端可能缓存另一模式的解析结果 (假 IP/真 IP),
+					# 清掉路由器侧缓存; 手机电脑建议重连一次 WiFi 或清 DNS 缓存
+					killall -HUP dnsmasq 2>/dev/null
+					log "已生效, 当前 DNS 模式: $(dns_mode)"
+				else
+					log "重建配置失败 (网络?), 未生效, 进程保持原样"
+					exit 1
+				fi
+				;;
+			status)
+				if [ "$(nvram get mh_fakeip 2>/dev/null)" = "1" ]; then
+					echo "fake-ip 开关: 开 (重启后仍生效, 存 nvram)"
+				else
+					echo "fake-ip 开关: 关 (DNS 模式: redir-host)"
+				fi
+				if [ -f "$CFG" ]; then
+					grep -o "enhanced-mode: [a-z-]*" "$CFG" | head -1
+					grep -q "enhanced-mode: fake-ip" "$CFG" && \
+						echo "提示: 客户端看到的解析结果是 198.18.x.x 假 IP, 属正常现象"
+				fi
+				;;
+			*) echo "用法: mihomo-start fakeip [on|off|status]"; exit 1 ;;
+		esac
 		;;
 	et-start) et_start ;;
 	et-stop)  et_stop ;;
