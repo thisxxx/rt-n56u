@@ -60,6 +60,12 @@ endif
 ifeq ($(CONFIG_FIRMWARE_INCLUDE_HTTPS),y)
 LIBS_INCLUDE_LIBSSL=y
 endif
+# busybox wget 的 https 走 CONFIG_FEATURE_WGET_OPENSSL, 也就是 fork 一个外部
+# openssl 命令行做 TLS 握手。固件里没有 openssl 就报 "can't execute 'openssl'",
+# 所有 https 订阅都拉不动。只要装 openssl 可执行文件, 就必须带上这两个 .so。
+ifeq ($(CONFIG_FIRMWARE_INCLUDE_OPENSSL_EXE),y)
+LIBS_INCLUDE_LIBSSL=y
+endif
 ifeq ($(CONFIG_FIRMWARE_INCLUDE_SFTP),y)
 LIBS_INCLUDE_LIBSSL=y
 endif

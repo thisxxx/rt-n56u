@@ -84,6 +84,9 @@ CFG=$RUNDIR/config.yaml
 CFG_NEW=$RUNDIR/config.yaml.new
 CFG_BAK=$RUNDIR/config.yaml.ok
 SUB_URL_FILE=$STOR/sub_url.txt
+# 本地订阅文件: 电脑下载好订阅后 scp 上来, 配合 nvram mh_sub_local=1 使用,
+# 用于固件没有 TLS 能力 / 订阅站被墙 / 机场只给 https 的场合
+SUB_LOCAL=$STOR/sub.yaml
 USER_SED=$STOR/my_sed.sh
 SLIM_CONF=$STOR/slim.conf
 STATF=/tmp/mihomo/.slimstat
@@ -353,11 +356,24 @@ sub_url_get() {
 
 do_fetch() {
 	SUB_URL=$(sub_url_get)
-	[ -n "$SUB_URL" ] || { log "没有订阅地址: 到 Web 页面填, 或写入 $SUB_URL_FILE"; return 1; }
-
 	mkdir -p "$RUNDIR"
 	# 必须在 mihomo -t 之前补种: 校验阶段解析到 GEOIP 规则同样会触发下载
 	geo_seed
+
+	# ---- 本地订阅文件 (应急通道) ----
+	# 老固件的 busybox wget 需要外部 openssl 才能走 https, 固件没带就完全拉不了。
+	# 这种时候让用户在电脑上把订阅下载下来, scp 到 SUB_LOCAL, 再去 SSH 里:
+	#     nvram set mh_sub_local=1; nvram commit
+	# 之后所有 update 都从本地文件走, 不再联网。
+	# 想恢复在线拉取: nvram set mh_sub_local=0 或删掉该文件。
+	if [ "$(nvram get mh_sub_local 2>/dev/null)" = "1" ] && [ -s "$SUB_LOCAL" ]; then
+		log "使用本地订阅文件: $SUB_LOCAL"
+		cp -f "$SUB_LOCAL" "$CFG_NEW"
+		SUB_URL="file://$SUB_LOCAL"
+		FETCH_ERR=/dev/null
+		FETCH_OK=1
+	else
+		[ -n "$SUB_URL" ] || { log "没有订阅地址: 到 Web 页面填, 或写入 $SUB_URL_FILE"; return 1; }
 	log "拉取订阅: $SUB_URL"
 
 	# ---- 下载: wget -> wget(跳过证书) -> curl, 三级兜底 ----
@@ -406,6 +422,9 @@ do_fetch() {
 
 	[ "$FETCH_OK" = "1" ] || { log "下载失败, 订阅地址: $SUB_URL"; return 1; }
 	[ -s "$CFG_NEW" ] || { log "下载内容为空 (0 字节)"; return 1; }
+	fi	# 本地订阅 / 在线下载 二选一结束
+
+	[ -s "$CFG_NEW" ] || { log "配置内容为空: 检查 $SUB_LOCAL 或订阅地址"; return 1; }
 
 	# 拿到 200 不代表拿对了内容: 机场欠费/被墙时经常回一个 HTML 错误页或 base64 订阅,
 	# 直接往下走会被 mihomo -t 判配置非法, 而用户看不出是订阅格式不对。
