@@ -392,31 +392,53 @@ do_fetch() {
 		wget -T 20 -O "$CFG_NEW" -U "$UA_SUB" "$@" "$SUB_URL" 2>"$FETCH_ERR"
 	}
 
-	if wget_sub; then
-		FETCH_OK=1
-	else
-		log "wget 失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
-		case "$SUB_URL" in
-		https://*|HTTPS://*)
-			log "重试: 跳过证书校验"
-			if wget_sub --no-check-certificate; then
-				FETCH_OK=1
-				log "证书校验是失败原因: 固件 CA 包过旧, 已改用不校验方式 (建议换 https 证书正常的地址)"
-			else
-				log "跳过证书仍失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
-			fi
-			;;
-		esac
-	fi
+	# ★ 优先用 curl, 不用 wget。
+	#   固件的 busybox wget 编的是 CONFIG_FEATURE_WGET_OPENSSL: 处理 https 时
+	#   它不自己握手, 而是 fork 外部 openssl 命令行, 而固件里没有 openssl 可执行
+	#   文件, 于是直接 "can't execute 'openssl'". 这种情况下 wget 无论加什么参数
+	#   都拉不了 https, --no-check-certificate 也救不了(连 TLS 通道都建不起来)。
+	#
+	#   而 libcurl 这套固件是用 --with-mbedtls 编的(mbedtls 2.7.12, 支持到 TLS1.2),
+	#   自带完整 TLS 实现, 不依赖外部 openssl, 是这台机器上唯一能走 https 的东西。
+	#   注意 libcurl 是 --without-ca-bundle 编的, 固件里没有 CA 包, 所以免不了 -k。
+	curl_sub() {
+		curl -fsSL --connect-timeout 15 --max-time 45 -A "$UA_SUB" "$@" \
+			-o "$CFG_NEW" "$SUB_URL" 2>"$FETCH_ERR"
+	}
 
-	if [ "$FETCH_OK" = "0" ] && command -v curl >/dev/null 2>&1; then
-		log "改用 curl 重试"
-		if curl -fsSL --connect-timeout 20 --max-time 45 -A "$UA_SUB" \
-			-o "$CFG_NEW" "$SUB_URL" 2>"$FETCH_ERR"; then
+	if command -v curl >/dev/null 2>&1; then
+		if curl_sub; then
 			FETCH_OK=1
 			log "curl 拉取成功"
 		else
 			log "curl 失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+			# 固件没带 CA 包, 默认校验必然失败; -k 在这里是常态而非降级
+			if curl_sub -k; then
+				FETCH_OK=1
+				log "curl 已拉取成功 (跳过证书校验: 固件无 CA 包)"
+			else
+				log "curl -k 仍失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+			fi
+		fi
+	else
+		log "固件里没有 curl, 只能用 wget (https 会因缺 openssl 而失败)"
+	fi
+
+	# wget 兜底: 仅在 curl 不存在或全失败时尝试, 纯 http 订阅走这条没问题
+	if [ "$FETCH_OK" = "0" ]; then
+		if wget_sub; then
+			FETCH_OK=1
+		else
+			log "wget 失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+			case "$SUB_URL" in
+			https://*|HTTPS://*)
+				if wget_sub --no-check-certificate; then
+					FETCH_OK=1
+				else
+					log "wget 跳过证书仍失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+				fi
+				;;
+			esac
 		fi
 	fi
 
