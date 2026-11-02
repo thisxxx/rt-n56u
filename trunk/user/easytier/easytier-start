@@ -95,12 +95,12 @@ do_start() {
 
 	[ -x "$BIN" ] || { log "错误: 找不到 $BIN"; return 1; }
 	[ -n "$NN" ] || { log "错误: 网络名 et_network_name 为空, 拒绝启动"; return 2; }
-	[ -n "$IP" ] || { log "错误: IPv4 地址 et_ipv4 为空, 拒绝启动"; return 2; }
 
 	set --
 	set -- "$@" --network-name "$NN"
 	[ -n "$NS" ] && set -- "$@" --network-secret "$NS"
-	set -- "$@" --ipv4 "$IP"
+	# IPv4 可选: 留空就不传 --ipv4, EasyTier 不分配虚拟 IP, 仍可入网做中继/subnet proxy
+	[ -n "$IP" ] && set -- "$@" --ipv4 "$IP"
 
 	# ---- 可重复参数: 一个值一个开关 ----
 	# $ET_xxx 故意【不加引号】: 加了引号整串只算一个 argv, 就不是"可重复"了。

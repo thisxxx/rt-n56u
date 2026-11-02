@@ -86,11 +86,7 @@ function validForm(){
 			document.form.et_network_name.focus();
 			return false;
 		}
-		if (trim_str(document.form.et_ipv4.value) == ''){
-			alert('已勾选“启用”，但“本机 IPv4 地址”没填。\n示例: 10.126.126.1/24');
-			document.form.et_ipv4.focus();
-			return false;
-		}
+		/* 本机 IPv4 允许留空: 不指定虚拟网段地址, EasyTier 照样能加入网络做中继 / 子网代理 */
 	}
 	return true;
 }
@@ -238,9 +234,10 @@ function refresh_state(){
                                         </tr>
 
                                         <tr>
-                                            <th>本机 IPv4 <code>--ipv4</code></th>
+                                            <th>本机 IPv4 <code>--ipv4</code><br><span style="font-weight: normal; color: #999;">可留空</span></th>
                                             <td>
-                                                <input type="text" class="input" size="32" maxlength="32" name="et_ipv4" value="<% nvram_get_x("","et_ipv4"); %>" placeholder="10.126.126.1/24">
+                                                <input type="text" class="input" size="32" maxlength="32" name="et_ipv4" value="<% nvram_get_x("","et_ipv4"); %>" placeholder="10.126.126.1/24，留空=不分配虚拟 IP">
+                                                <div style="color: #999; margin-top: 4px;">留空则不指定虚拟网段地址，仍可加入网络做中继 / 子网代理。</div>
                                             </td>
                                         </tr>
 

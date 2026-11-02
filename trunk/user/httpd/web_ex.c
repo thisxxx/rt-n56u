@@ -2390,8 +2390,7 @@ easytier_action_hook(int eid, webs_t wp, int argc, char **argv)
 		err = "固件里没有 /usr/bin/easytier-core (编译时没开 CONFIG_FIRMWARE_INCLUDE_EASYTIER)";
 	else if (enabled && !*(nvram_safe_get("et_network_name")))
 		err = "已勾选启用, 但网络名为空: 没有改动 EasyTier";
-	else if (enabled && !*(nvram_safe_get("et_ipv4")))
-		err = "已勾选启用, 但 IPv4 地址为空: 没有改动 EasyTier";
+	/* 本机 IPv4 允许空: 不指定虚拟网段地址, 仍可入网做中继 / 子网代理 */
 	else if (easytier_write_runner() != 0)
 		err = "写 /tmp/easytier/run.sh 失败: /tmp 空间不足?";
 
