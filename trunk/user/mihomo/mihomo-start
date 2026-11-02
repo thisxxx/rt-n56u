@@ -104,7 +104,13 @@ HTTP_PORT=7893       # mixed-port (浏览器手动填代理用)
 MARK=1               # fwmark
 RT_TABLE=100         # 策略路由表号
 
-log() { logger -t "【mihomo】" "$*"; echo "mihomo: $*"; }
+# Web 面板底部"日志"读的就是 $LOG, 只写 syslog 的话用户在页面上看不到任何失败原因,
+# 只能看到"拉订阅失败"四个字。这里同时追加一份到 $LOG。
+log() {
+	logger -t "【mihomo】" "$*"
+	echo "mihomo: $*"
+	echo "$(date '+%m-%d %H:%M:%S') $*" >>"$LOG" 2>/dev/null
+}
 
 # DNS 模式: fake-ip 开关 (nvram mh_fakeip, 1=fake-ip / 缺省 redir-host)
 # 注意: 切模式必须重建配置 (restart 沿用旧 CFG), 所以 fakeip 子命令走 update 流程
@@ -352,11 +358,61 @@ do_fetch() {
 	mkdir -p "$RUNDIR"
 	# 必须在 mihomo -t 之前补种: 校验阶段解析到 GEOIP 规则同样会触发下载
 	geo_seed
-	log "拉取订阅..."
-	wget -q -T 20 -O "$CFG_NEW" \
-		--user-agent="clash.meta/v1.18.0" \
-		"$SUB_URL" || { log "下载失败: $SUB_URL"; return 1; }
-	[ -s "$CFG_NEW" ] || { log "下载内容为空"; return 1; }
+	log "拉取订阅: $SUB_URL"
+
+	# ---- 下载: wget -> wget(跳过证书) -> curl, 三级兜底 ----
+	# 1) 老毛子的 wget 是 busybox 版, 内置 CA 是编译时的老证书包。订阅站换过根证书
+	#    (Let's Encrypt ISRG Root X1 / ZeroSSL) 后就会校验失败 —— 浏览器能打开、
+	#    路由器拉不了, 就是这一条。
+	# 2) 以前用 -q 把错误全吞了, 日志里只有"下载失败", 无从判断是 DNS、证书还是 403。
+	#    现在原始报错会进日志。
+	# 3) UA 必须保留: 机场按 UA 返回格式, 用默认 UA 可能回 base64 的 v2ray 订阅。
+	UA_SUB="clash.meta/v1.18.0"
+	FETCH_ERR="$RUNDIR/.fetch.err"
+	: >"$FETCH_ERR"
+	FETCH_OK=0
+
+	wget_sub() {
+		wget -T 20 -O "$CFG_NEW" -U "$UA_SUB" "$@" "$SUB_URL" 2>"$FETCH_ERR"
+	}
+
+	if wget_sub; then
+		FETCH_OK=1
+	else
+		log "wget 失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+		case "$SUB_URL" in
+		https://*|HTTPS://*)
+			log "重试: 跳过证书校验"
+			if wget_sub --no-check-certificate; then
+				FETCH_OK=1
+				log "证书校验是失败原因: 固件 CA 包过旧, 已改用不校验方式 (建议换 https 证书正常的地址)"
+			else
+				log "跳过证书仍失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+			fi
+			;;
+		esac
+	fi
+
+	if [ "$FETCH_OK" = "0" ] && command -v curl >/dev/null 2>&1; then
+		log "改用 curl 重试"
+		if curl -fsSL --connect-timeout 20 --max-time 45 -A "$UA_SUB" \
+			-o "$CFG_NEW" "$SUB_URL" 2>"$FETCH_ERR"; then
+			FETCH_OK=1
+			log "curl 拉取成功"
+		else
+			log "curl 失败: $(tr '\n' ' ' <"$FETCH_ERR" | cut -c1-300)"
+		fi
+	fi
+
+	[ "$FETCH_OK" = "1" ] || { log "下载失败, 订阅地址: $SUB_URL"; return 1; }
+	[ -s "$CFG_NEW" ] || { log "下载内容为空 (0 字节)"; return 1; }
+
+	# 拿到 200 不代表拿对了内容: 机场欠费/被墙时经常回一个 HTML 错误页或 base64 订阅,
+	# 直接往下走会被 mihomo -t 判配置非法, 而用户看不出是订阅格式不对。
+	if ! grep -qE '^[[:space:]]*(proxies|proxy-providers)[[:space:]]*:' "$CFG_NEW"; then
+		log "警告: 订阅里没有 proxies:/proxy-providers:, 可能不是 Clash 格式 (或订阅已过期/是 base64 链接)"
+		log "响应开头: $(head -c 120 "$CFG_NEW" | tr -d '\r\n' | cut -c1-120)"
+	fi
 
 	# ---- 内置通用补丁 (只动顶层单行键, sed 安全) ----
 	sed -i \
