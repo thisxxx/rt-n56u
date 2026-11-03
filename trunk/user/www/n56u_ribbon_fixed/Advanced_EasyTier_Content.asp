@@ -264,7 +264,7 @@ function refresh_state(){
                                         </tr>
 
                                         <tr>
-                                            <th>虚拟网卡<br><span style="font-weight: normal; color: #999;">暂未启用（参数待适配）</span></th>
+                                            <th>虚拟网卡 <code>--tun</code><br><span style="font-weight: normal; color: #999;">默认关</span></th>
                                             <td>
                                                 <div class="main_itoggle">
                                                     <div id="et_tun_on_of">
@@ -275,7 +275,7 @@ function refresh_state(){
                                                     <input type="radio" value="1" name="et_tun" id="et_tun_1" <% nvram_match_x("", "et_tun", "1", "checked"); %>><#checkbox_Yes#>
                                                     <input type="radio" value="0" name="et_tun" id="et_tun_0" <% nvram_match_x("", "et_tun", "0", "checked"); %>><#checkbox_No#>
                                                 </div>
-                                                <span style="color: #999; margin-left: 8px;">当前 easytier-lite 版本没有可用的虚拟网卡参数，勾选后<b>不会下发任何参数</b>（日志里有提示）。默认只当中继 / 子网代理</span>
+                                                <span style="color: #999; margin-left: 8px;">建虚拟网卡，需要本机有虚拟 IP（手填 IPv4 或勾 DHCP）；只当中继 / 子网代理就不用开</span>
                                             </td>
                                         </tr>
 
@@ -359,14 +359,22 @@ easytier-lite \
   --network-name 你的网络名 \
   --network-secret 你的密钥 \
   -d \
+  -p tcp://公网节点:11010
+
+# 要建虚拟网卡才加 --tun（默认不建）; 必须配 --ipv4 或 -d
+easytier-lite \
+  --network-name 你的网络名 \
+  --network-secret 你的密钥 \
+  -d --tun \
   -p tcp://公网节点:11010</pre>
                                         <div style="margin-top: 6px; color: #777;">
                                             说明: 本页只把 <b>已填</b> 的项拼进命令行；留空的项不会传。
                                             “对等节点”“子网代理”“私有组”三个框里<b>填几个值就重复几次</b> <code>-p</code> / <code>-n</code> / <code>--private-group</code>，值之间用<b>空格</b>分隔。
                                             单个值内部不能有空格（脚本按空格拆词，拆不开的写法会变成两个参数）。
-                                            <b>虚拟网卡默认关，当前版本暂不下发</b>：不开就只当中继 / 子网代理（最省内存）。该选项等 easytier-lite 提供可用参数后再接上，界面保留但不影响实际启动。
+                                            <b>虚拟网卡 --tun 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开，且必须搭配一个虚拟 IP（手填或 -d）。
                                             本机 IP 三种选法：<b>① 手填「本机 IPv4」</b>；② IPv4 留空 + 勾选「DHCP 自动分配 (-d)」，由网络内开 DHCP 的节点分一个；
-                                            ③ 两个都不选，本机没有虚拟 IP，仅当中继 / 子网代理用。
+                                            ③ 两个都不选，本机没有虚拟 IP，仅当中继 / 子网代理用（此时虚拟网卡不会启用）。
+                                            若当前二进制不支持 --tun，脚本会自动跳过并在日志里注明，不影响隧道本身。
                                             实际可执行版本每次“应用”后生成在 /tmp/easytier/run.sh。
                                         </div>
                                     </div>
