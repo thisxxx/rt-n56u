@@ -35,7 +35,7 @@ function initial(){
 	init_itoggle('mh_autostart');
 	init_itoggle('mh_fakeip');
 	init_itoggle('mh_slim');
-	slim_init();
+	slim_text_init();
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -136,42 +136,39 @@ function mihomo_apply_done(ok, msg){
 		alert(msg);
 }
 
-/* ================= 订阅精简参数 ================= */
+/* ================= 订阅精简 (sed 文本框) ================= */
 
-/* 与 mihomo-start 里的内置默认保持一致 */
-var SLIM_DEFAULT = { dedup: '1', cut: '1', sniff: '1', dnsmax: '3', geoupd: '0' };
-
-function slim_field(k){
-	return document.getElementById('sel_' + k);
+/* 文本框为空 = 用内置默认精简; 非空 = 整段替代内置精简 (sed -f 语法) */
+function slim_text_init(){
+	var t = document.getElementById('mh_slim_text');
+	if (t && trim_str(t.value) === '')
+		t.placeholder = SLIM_REF;
 }
 
-/* nvram 里没存过就把控件显示成默认值 */
-function slim_init(){
-	var cur = {
-		dedup:  '<% nvram_get_x("","mh_slim_dedup"); %>',
-		cut:    '<% nvram_get_x("","mh_slim_cut"); %>',
-		sniff:  '<% nvram_get_x("","mh_slim_sniff"); %>',
-		dnsmax: '<% nvram_get_x("","mh_slim_dnsmax"); %>',
-		geoupd: '<% nvram_get_x("","mh_slim_geoupd"); %>'
-	};
-	for (var k in SLIM_DEFAULT){
-		var el = slim_field(k);
-		if (!el)
-			continue;
-		var v = trim_str(cur[k]);
-		el.value = (v === '') ? SLIM_DEFAULT[k] : v;
-	}
+function slim_clear(){
+	if (!confirm('清空后恢复内置默认精简, 确定清空?'))
+		return;
+	var t = document.getElementById('mh_slim_text');
+	t.value = '';
+	t.placeholder = SLIM_REF;
 }
 
-/* 只改控件, 要点“应用”才提交 */
-function slim_default(){
-	for (var k in SLIM_DEFAULT){
-		var el = slim_field(k);
-		if (el)
-			el.value = SLIM_DEFAULT[k];
-	}
-}
-
+/* 只读参考: 内置默认精简的动作清单 (与 mihomo-start 内置实现对应) */
+var SLIM_REF = [
+'# 内置默认精简(文本框留空时自动执行)的动作:',
+'#   1. rules 去重               (跨行处理, 脚本内置 awk)',
+'#   2. 截断 MATCH 之后的规则     (同上)',
+'#   3. 关闭 sniffer             (跨行处理, 内置 awk)',
+'#   4. dns.nameserver 只留前 3 条 (跨行处理, 内置 awk)',
+'#   5. geo-auto-update 关闭, 等效 sed:',
+'#        s/^geo-auto-update:.*/geo-auto-update: false/',
+'#',
+'# 注意: 你写了内容后, 上面 1-5 全部不再执行, 需要的行为要自己写。',
+'# 每行一条 sed 命令, 对订阅配置生效。常用示例:',
+'#   s/^log-level:.*/log-level: info/',
+'#   /- {name:.*香港-01/d        # 删除名字含 香港-01 的节点行',
+'#   s/香港-01/香港01/g          # 批量改名'
+].join('\n');
 function refresh_state(){
 	location.reload();
 }
@@ -343,32 +340,19 @@ function open_panel(){
                                                     开启后拉订阅时做针对性裁剪。改动点“应用”会自动重建配置生效。
                                                 </div>
                                                 <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #DDD; color: #555;">
-                                                    规则去重
-                                                    <select name="mh_slim_dedup" id="sel_dedup" class="input" style="width: 76px;">
-                                                        <option value="1">开</option><option value="0">关</option>
-                                                    </select>
-                                                    &nbsp;&nbsp;截断 MATCH 之后
-                                                    <select name="mh_slim_cut" id="sel_cut" class="input" style="width: 76px;">
-                                                        <option value="1">开</option><option value="0">关</option>
-                                                    </select>
-                                                    &nbsp;&nbsp;关 sniffer
-                                                    <select name="mh_slim_sniff" id="sel_sniff" class="input" style="width: 76px;">
-                                                        <option value="1">开</option><option value="0">关</option>
-                                                    </select>
-                                                    <br style="line-height: 8px;">
-                                                    nameserver 只留
-                                                    <select name="mh_slim_dnsmax" id="sel_dnsmax" class="input" style="width: 76px;">
-                                                        <option value="0">不限制</option><option value="1">1 条</option><option value="2">2 条</option><option value="3">3 条</option><option value="4">4 条</option><option value="5">5 条</option>
-                                                    </select>
-                                                    &nbsp;&nbsp;geo 自动更新
-                                                    <select name="mh_slim_geoupd" id="sel_geoupd" class="input" style="width: 76px;">
-                                                        <option value="0">关</option><option value="1">开</option>
-                                                    </select>
-                                                    &nbsp;&nbsp;
-                                                    <button class="btn btn-mini" type="button" onclick="slim_default();">恢复默认</button>
-                                                    <div style="color: #999; margin-top: 4px;">
-                                                        默认：去重开、截断开、关 sniffer、nameserver 留 3 条、geo 自动更新关。
+                                                    <div style="margin-bottom: 6px;">
+                                                        自定义精简 <b>sed</b>（每行一条，对订阅配置执行；
+                                                        <b>写了内容就整段替代内置精简，留空则用内置默认</b>）：
+                                                        &nbsp;<button class="btn btn-mini" type="button" onclick="slim_clear();">清空(用内置默认)</button>
                                                     </div>
+                                                    <textarea name="mh_slim_text" id="mh_slim_text" rows="9" wrap="off" spellcheck="false"
+                                                              maxlength="4096"
+                                                              style="width: 96%; font-family: 'Courier New', monospace; font-size: 12px;"><% nvram_get_x("","mh_slim_text"); %></textarea>
+                                                    <div style="color: #999; margin-top: 4px;">
+                                                        改完点页面底部“应用本页面设置”保存；下次拉订阅(或手动 mihomo-start update)生效。
+                                                        sed 执行出错会自动回退内置精简，不会把订阅打碎。内置默认动作见文本框占位提示。
+                                                    </div>
+                                                </div>
                                                 </div>
                                             </td>
                                         </tr>
