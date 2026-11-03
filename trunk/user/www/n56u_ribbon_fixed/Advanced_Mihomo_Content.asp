@@ -308,7 +308,7 @@ function open_panel(){
                                         <tr>
                                             <th>转发端口<br><span style="font-weight: normal; color: #999;">固定</span></th>
                                             <td>
-                                                <code>7892</code> TCP REDIRECT + UDP TPROXY（透明代理，局域网设备走这个）
+                                                <code>7892</code> TCP REDIRECT ／ <code>7894</code> UDP TPROXY（透明代理，局域网设备走这个）
                                                 &nbsp;|&nbsp; <code>7893</code> mixed（HTTP/SOCKS，给浏览器手动填）
                                                 &nbsp;|&nbsp; <code>8053</code> 内置 DNS
                                             </td>
