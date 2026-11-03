@@ -2249,6 +2249,7 @@ static int
 easytier_write_runner(void)
 {
 	FILE *fp;
+	const char *lv;
 
 	if (mkdir("/tmp/easytier", 0755) != 0 && errno != EEXIST)
 		return -1;
@@ -2270,9 +2271,29 @@ easytier_write_runner(void)
 	 * 填了静态 IP 就不传, 避免两种来源打架 */
 	if (nvram_get_int("et_dhcp") && !*(nvram_safe_get("et_ipv4")))
 		fputs(" -d", fp);
-	/* 虚拟网卡: 当前 easytier-lite 版本没有可用的命令行参数, easytier-start 也不下发,
-	 * 这里同样不输出, 保证"预览的命令"和"真正跑的命令"一致 */
-	easytier_sh_arg(fp, "-p", nvram_safe_get("et_peers"));
+	/* 虚拟网卡: 与 easytier-start 同规则 —— 必须先有 IP 来源(手填 IPv4 或 -d),
+	 * 没有就不启用. 二进制是否认 --tun 由 easytier-start 现场用 --help 探测 */
+	if (nvram_get_int("et_tun") &&
+	    (*(nvram_safe_get("et_ipv4")) || nvram_get_int("et_dhcp")))
+		fputs(" --tun", fp);
+
+	/* 主机名: 留空不传 */
+	easytier_sh_arg(fp, "--hostname", nvram_safe_get("et_hostname"));
+
+	/* 监听: --no-listener 只出不进, 与 -l 互斥 —— 勾了就只输出 --no-listener;
+	 * 没勾且填了监听地址才逐个输出 -l, 全空则不传(由 lite 用缺省 tcp+udp 0.0.0.0:11010) */
+	if (nvram_get_int("et_no_listener"))
+		fputs(" --no-listener", fp);
+	else
+		easytier_sh_arg_list(fp, "-l", nvram_safe_get("et_listeners"));
+
+	/* 日志级别: 只认 lite 支持的五个值, 其它值不传(与 easytier-start 一致) */
+	lv = nvram_safe_get("et_log_level");
+	if (*lv && (!strcmp(lv, "trace") || !strcmp(lv, "debug") ||
+		    !strcmp(lv, "info") || !strcmp(lv, "warn") || !strcmp(lv, "error")))
+		easytier_sh_arg(fp, "--console-log-level", lv);
+
+	easytier_sh_arg_list(fp, "-p", nvram_safe_get("et_peers"));
 	easytier_sh_arg_list(fp, "-n", nvram_safe_get("et_subnets"));
 	easytier_sh_arg_list(fp, "--private-group", nvram_safe_get("et_private_groups"));
 	fputs(" &\n", fp);
