@@ -2266,6 +2266,12 @@ easytier_write_runner(void)
 	easytier_sh_arg(fp, "--network-name", nvram_safe_get("et_network_name"));
 	easytier_sh_arg(fp, "--network-secret", nvram_safe_get("et_network_secret"));
 	easytier_sh_arg(fp, "--ipv4", nvram_safe_get("et_ipv4"));
+	/* DHCP 自动分配虚拟 IP: 与 easytier-start 保持同一套规则 —— 只在 IPv4 留空时下发 -d,
+	 * 填了静态 IP 就不传, 避免两种来源打架 */
+	if (nvram_get_int("et_dhcp") && !*(nvram_safe_get("et_ipv4")))
+		fputs(" -d", fp);
+	/* 虚拟网卡: 当前 easytier-lite 版本没有可用的命令行参数, easytier-start 也不下发,
+	 * 这里同样不输出, 保证"预览的命令"和"真正跑的命令"一致 */
 	easytier_sh_arg(fp, "-p", nvram_safe_get("et_peers"));
 	easytier_sh_arg_list(fp, "-n", nvram_safe_get("et_subnets"));
 	easytier_sh_arg_list(fp, "--private-group", nvram_safe_get("et_private_groups"));
