@@ -271,7 +271,7 @@ function refresh_state(){
                                                     <input type="radio" value="1" name="et_tun" id="et_tun_1" <% nvram_match_x("", "et_tun", "1", "checked"); %>><#checkbox_Yes#>
                                                     <input type="radio" value="0" name="et_tun" id="et_tun_0" <% nvram_match_x("", "et_tun", "0", "checked"); %>><#checkbox_No#>
                                                 </div>
-                                                <span style="color: #999; margin-left: 8px;">创建虚拟网卡；本机需要有虚拟 IP（手填 IPv4 或勾 DHCP 二选一），只当中继就不用开</span>
+                                                <span style="color: #999; margin-left: 8px;">创建虚拟网卡，需要本机有虚拟 IP（手填 IPv4 或勾 DHCP）；两者都没选时开了也不生效（脚本自动忽略）。只当中继 / 子网代理就不用开</span>
                                             </td>
                                         </tr>
 
@@ -360,8 +360,9 @@ easytier-lite \
                                             说明: 本页只把 <b>已填</b> 的项拼进命令行；留空的项不会传。
                                             “对等节点”“子网代理”“私有组”三个框里<b>填几个值就重复几次</b> <code>-p</code> / <code>-n</code> / <code>--private-group</code>，值之间用<b>空格</b>分隔。
                                             单个值内部不能有空格（脚本按空格拆词，拆不开的写法会变成两个参数）。
-                                            <b>虚拟网卡 --tun 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开，
-                                            且本机必须有虚拟 IP —— <b>手填「本机 IPv4」或勾选「DHCP 自动分配 (-d)」二选一</b>（-d 只在 IPv4 留空时生效，由网络内开 DHCP 的节点分 IP）。
+                                            <b>虚拟网卡 --tun 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开。
+                                            本机 IP 三种选法：<b>① 手填「本机 IPv4」</b>；② IPv4 留空 + 勾选「DHCP 自动分配 (-d)」，由网络内开 DHCP 的节点分一个；
+                                            ③ 两个都不选，本机没有虚拟 IP，仅当中继 / 子网代理用（此时即使开了 --tun 也会被脚本自动忽略）。
                                             实际可执行版本每次“应用”后生成在 /tmp/easytier/run.sh。
                                         </div>
                                     </div>
