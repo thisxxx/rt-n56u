@@ -93,6 +93,12 @@ do_start() {
 	ET_SUBNETS=$(et_norm "$(get et_subnets)")
 	ET_PGRPS=$(et_norm "$(get et_private_groups)")
 
+	# 以下四项: 主机名 / 监听地址 / 不监听 / 日志级别
+	HN=$(et_norm "$(get et_hostname)")
+	ET_LISTEN=$(et_norm "$(get et_listeners)")
+	LV=$(et_norm "$(get et_log_level)")
+	NO_LISTEN=$(get et_no_listener)
+
 	[ -x "$BIN" ] || { log "错误: 找不到 $BIN"; return 1; }
 	[ -n "$NN" ] || { log "错误: 网络名 et_network_name 为空, 拒绝启动"; return 2; }
 
@@ -123,6 +129,29 @@ do_start() {
 			log "虚拟网卡: 已启用 --tun"
 		fi
 	fi
+
+	# 主机名 (--hostname): 纯透传, 留空不传
+	[ -n "$HN" ] && set -- "$@" --hostname "$HN"
+
+	# 监听 (-l, 可重复): 留空就完全不传, 交给 lite 的缺省 tcp+udp 0.0.0.0:11010
+	# --no-listener 是"只出不进", 与 -l 语义互斥: 勾了就只传 --no-listener, 不再传 -l
+	if [ "$NO_LISTEN" = "1" ]; then
+		set -- "$@" --no-listener
+		[ -n "$ET_LISTEN" ] && log "提示: 已勾选不监听(--no-listener), 监听地址 '$ET_LISTEN' 已忽略"
+	else
+		for v in $ET_LISTEN; do
+			[ -n "$v" ] && set -- "$@" -l "$v"
+		done
+	fi
+
+	# 日志级别 (--console-log-level): 只认下面五个值; lite 遇到未知参数会直接退出,
+	# 所以填了别的一律不传, 只记一行日志
+	case "$LV" in
+		trace|debug|info|warn|error)
+			set -- "$@" --console-log-level "$LV" ;;
+		"") ;;
+		*) log "提示: 日志级别 '$LV' 不在 trace/debug/info/warn/error 内, 已忽略" ;;
+	esac
 
 	# ---- 可重复参数: 一个值一个开关 ----
 	# $ET_xxx 故意【不加引号】: 加了引号整串只算一个 argv, 就不是"可重复"了。
