@@ -1,0 +1,187 @@
+#!/bin/sh
+#
+# easytier-firewall -- 为 EasyTier 下发 / 回收 iptables 规则
+#
+# 安装位置: /usr/bin/easytier-firewall
+#
+# 为什么要单独一个脚本:
+#   Padavan 的「简易防火墙」页面只有几个开关, 填不了自定义规则; 而用户脚本页
+#   (/etc/storage/post_iptables_script.sh) 属于用户资产, 固件不该往里写东西。
+#   所以规则由固件自带本脚本来维护, 防火墙重启后由 rc 自动重放。
+#
+# 设计要点: 规则全部放进自有链表, 与固件自带规则物理隔离
+#   EASYTIER_IN    挂到 INPUT     (协议端口 + 本机 tun 入站)
+#   EASYTIER_FWD   挂到 FORWARD   (tun0 与 lan/wan 双向放行)
+#   nat POSTROUTING 的单条 MASQUERADE (出口伪装)
+#
+#   apply 每次都先 flush 自己的链再重建, 因此:
+#     * 幂等 —— 重复执行结果一致, WAN 重连后重放不会堆出重复规则
+#     * 换端口自动生效 —— 端口是从 nvram 现读的, 不需要文本替换
+#     * 零风险 —— 永远不会 flush 到固件自己的规则
+#
+# 监听端口来源 (与面板 -l 的取值完全一致, 空格分隔):
+#   et_listeners = "udp://0.0.0.0:11010 tcp://0.0.0.0:11010"
+#   未配置时用 easytier 默认端口 11010
+#   et_no_listener=1 时不监听任何端口, 只放行 tun 转发
+#
+# 用法:
+#   easytier-firewall apply    下发 / 刷新规则
+#   easytier-firewall clear    删除本脚本的全部规则
+#   easytier-firewall show     打印当前规则
+#   easytier-firewall ports    打印解析出来的端口 (排障用)
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PATH
+set -f
+
+NVRAM=/usr/sbin/nvram
+CHAIN_IN=EASYTIER_IN
+CHAIN_FWD=EASYTIER_FWD
+TUN=tun0
+DEF_PORT=11010
+
+log() {
+	logger -t easytier-fw "$*" 2>/dev/null
+	echo "$*"
+}
+
+get() {
+	[ -x "$NVRAM" ] && "$NVRAM" get "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# 端口解析
+#   取每个 -l 值最后一个冒号后面的东西, 纯数字才算端口
+#   udp://0.0.0.0:11010   -> 11010
+#   tcp://[::]:11010      -> 11010
+#   顺手去重, 因为面板里同时填 tcp/udp 两个监听口是常见写法
+# ---------------------------------------------------------------------------
+parse_ports() {
+	local v p ports=""
+
+	for v in $(get et_listeners); do
+		p=${v##*:}
+		case "$p" in
+			''|*[!0-9]*) continue ;;
+		esac
+		case " $ports " in
+			*" $p "*) continue ;;
+		esac
+		ports="$ports $p"
+	done
+
+	if [ -z "$ports" ] && [ "$(get et_no_listener)" != "1" ]; then
+		ports=" $DEF_PORT"
+	fi
+
+	echo $ports
+}
+
+# tun 名字: 默认 tun0, 找不到就退而求其次扫一个 tun*
+detect_tun() {
+	[ -e "/sys/class/net/$TUN" ] && return 0
+	for d in /sys/class/net/tun*; do
+		[ -e "$d" ] || continue
+		TUN=${d##*/}
+		return 0
+	done
+	return 0
+}
+
+# 出口接口: 优先 nvram, 其次默认路由, 最后按 MT7621 的常见值兜底
+detect_wan() {
+	local w
+	w=$(get wan_ifname)
+	[ -n "$w" ] || w=$(route -n 2>/dev/null | awk '$1=="0.0.0.0" && $2!="0.0.0.0" {print $8; exit}')
+	[ -n "$w" ] || w=eth2.2
+	echo "$w"
+}
+
+ensure_chain() {
+	# $1 = 挂载点链 (INPUT/FORWARD), $2 = 自有链
+	iptables -n -L "$2" >/dev/null 2>&1 || iptables -N "$2" || return 1
+	iptables -C "$1" -j "$2" 2>/dev/null || iptables -I "$1" 1 -j "$2" || return 1
+	return 0
+}
+
+clear_rules() {
+	iptables -D INPUT   -j "$CHAIN_IN"  2>/dev/null
+	iptables -D FORWARD -j "$CHAIN_FWD" 2>/dev/null
+	iptables -F "$CHAIN_IN"  2>/dev/null
+	iptables -F "$CHAIN_FWD" 2>/dev/null
+	iptables -X "$CHAIN_IN"  2>/dev/null
+	iptables -X "$CHAIN_FWD" 2>/dev/null
+	iptables -t nat -D POSTROUTING -o "$(detect_wan)" -j MASQUERADE 2>/dev/null
+	return 0
+}
+
+apply_rules() {
+	local ports wan
+	ports=$(parse_ports)
+	wan=$(detect_wan)
+	detect_tun
+
+	# 每次重建, 保证幂等
+	clear_rules
+
+	ensure_chain INPUT   "$CHAIN_IN"  || { log "错误: 无法创建 $CHAIN_IN"; return 1; }
+	ensure_chain FORWARD "$CHAIN_FWD" || { log "错误: 无法创建 $CHAIN_FWD"; return 1; }
+
+	# --- 协议端口 (对端直连 / 中转) ---
+	if [ -n "$ports" ]; then
+		for p in $ports; do
+			iptables -A "$CHAIN_IN" -p udp --dport "$p" -j ACCEPT
+			iptables -A "$CHAIN_IN" -p tcp --dport "$p" -j ACCEPT
+		done
+		log "放行协议端口:$ports"
+	else
+		log "未配置监听端口 (et_no_listener=1), 跳过端口放行"
+	fi
+
+	# --- 虚拟网卡进出本机 ---
+	iptables -A "$CHAIN_IN" -i "$TUN" -j ACCEPT
+
+	# --- 四向转发: tun<->lan / tun<->wan 一并覆盖 ---
+	iptables -A "$CHAIN_FWD" -i "$TUN" -j ACCEPT
+	iptables -A "$CHAIN_FWD" -o "$TUN" -j ACCEPT
+
+	# --- 出口伪装: 虚拟网段从这里出公网需要 SNAT ---
+	iptables -t nat -C POSTROUTING -o "$wan" -j MASQUERADE 2>/dev/null || \
+		iptables -t nat -A POSTROUTING -o "$wan" -j MASQUERADE
+
+	log "规则已下发: tun=$TUN wan=$wan 端口=[${ports# }]"
+	return 0
+}
+
+show_rules() {
+	echo "== INPUT =="
+	iptables -n -L INPUT 2>/dev/null | head -5
+	echo "== $CHAIN_IN =="
+	iptables -n -L "$CHAIN_IN" -v 2>/dev/null
+	echo "== $CHAIN_FWD =="
+	iptables -n -L "$CHAIN_FWD" -v 2>/dev/null
+	echo "== nat POSTROUTING =="
+	iptables -t nat -n -L POSTROUTING 2>/dev/null | head -8
+}
+
+case "$1" in
+	apply)
+		apply_rules
+		;;
+	clear|stop)
+		clear_rules
+		log "规则已清除"
+		;;
+	ports)
+		parse_ports
+		;;
+	show|status|"")
+		show_rules
+		;;
+	*)
+		echo "用法: easytier-firewall apply|clear|show|ports" >&2
+		exit 1
+		;;
+esac
+
+exit 0
