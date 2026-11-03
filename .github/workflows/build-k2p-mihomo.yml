@@ -53,7 +53,7 @@ env:
   # ---- 二进制来源 ----
   # easytier lite v0.2.5 (mipsel), CI 内下载解包, 不要在本地转存
   # 换版本只需改这一行 + ET_VER
-  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.7-20261103-e3d042f/easytier-lite-linux-mipsel.zip
+  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.7-20261103-efb0be0/easytier-lite-linux-mipsel.zip
   # lite 变体的 mihomo 版本与精简 tag
   MIHOMO_REF: v1.18.10
   MIHOMO_TAGS: no_fake_tcp,no_tailscale,no_zerotier,no_easytier,with_low_memory
