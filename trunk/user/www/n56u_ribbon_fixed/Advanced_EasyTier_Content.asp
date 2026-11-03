@@ -335,17 +335,46 @@ function refresh_state(){
                                     </table>
 
                                     <div class="alert" style="margin: 10px; background-color: #F7F7F9; border: 1px solid #E1E1E8;">
-                                        <b>参数速查（只读，免得忘了怎么填）</b>
-<pre style="margin: 8px 0 0 0; font-size: 12px; line-height: 1.5;"># 单组
+                                        <b>easytier-lite 全部可用参数</b>
+                                        <div style="margin-top: 4px; color: #777; font-size: 12px;">
+                                            本固件用的是 <b>lite 精简版</b>，命令行解析是手写的（不含 clap），只认下表这些参数。
+                                            它<b>遇到不认识的参数会直接退出</b>并打印 <code>unknown argument ...; try --help</code>，所以别往里塞完整版的参数。
+                                        </div>
+                                        <table style="margin-top: 8px; font-size: 12px; border-collapse: collapse; width: 100%;">
+                                            <tr style="background: #EFEFF3;">
+                                                <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid #DDD;">参数</th>
+                                                <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid #DDD;">短名</th>
+                                                <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid #DDD;">含义</th>
+                                                <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid #DDD;">本页</th>
+                                            </tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--network-name</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">网络名，<b>必填</b>，同一个网络内必须一致</td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--network-secret</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">网络密钥，需与其它节点一致</td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--ipv4</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">静态虚拟地址，带掩码如 <code>10.126.126.1/24</code>；留空则不传</td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--dhcp</code></td><td style="padding: 2px 6px;"><code>-d</code></td><td style="padding: 2px 6px;">由网络内开 DHCP 的节点自动分配虚拟 IP（<b>不是</b>守护进程）</td><td style="padding: 2px 6px;">开关</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--tun</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">创建虚拟网卡（<b>默认不建</b>，加了才建），需先有虚拟 IP</td><td style="padding: 2px 6px;">开关</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--peers</code></td><td style="padding: 2px 6px;"><code>-p</code></td><td style="padding: 2px 6px;">对等节点地址，如 <code>tcp://公网节点:11010</code>，可重复</td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--proxy-networks</code></td><td style="padding: 2px 6px;"><code>-n</code></td><td style="padding: 2px 6px;">子网代理，可重复；支持映射写法 <code>本网段-&gt;对端网段</code></td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--private-group</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">私有模式白名单 <code>"网络名#密钥"</code>，可重复</td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--hostname</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">本节点显示名，纯透传，留空则用系统名</td><td style="padding: 2px 6px;">未提供</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--listeners</code></td><td style="padding: 2px 6px;"><code>-l</code></td><td style="padding: 2px 6px;">监听地址；<b>不填时缺省 <code>tcp+udp 0.0.0.0:11010</code></b></td><td style="padding: 2px 6px;">未提供</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--no-listener</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">不监听，只主动出连（纯客户端 / 只出不进）</td><td style="padding: 2px 6px;">未提供</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--console-log-level</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">控制台日志级别 <code>warn</code> / <code>info</code> / <code>debug</code> 等</td><td style="padding: 2px 6px;">未提供</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--help</code> / <code>--version</code></td><td style="padding: 2px 6px;"><code>-h</code> / <code>-V</code></td><td style="padding: 2px 6px;">在 SSH 里确认当前二进制的版本与可用参数</td><td style="padding: 2px 6px;">—</td></tr>
+                                        </table>
+                                        <div style="margin-top: 4px; color: #777; font-size: 12px;">
+                                            标“未提供”的四个参数本页没有输入框，需要时改 <code>/tmp/easytier/run.sh</code> 或提需求加字段。
+                                        </div>
+
+                                        <div style="margin-top: 8px;"><b>常用写法</b></div>
+<pre style="margin: 6px 0 0 0; font-size: 12px; line-height: 1.5;"># 1) 手填 IP + 一个对等节点 + 代理自己网段（最常见的旁路由 / 子网互访）
 easytier-lite \
   --network-name 你的网络名 \
   --network-secret 你的密钥 \
   --ipv4 10.126.126.1/24 \
   -p tcp://公网节点:11010 \
-  -n 192.168.2.0/24 \
-  --private-group "朋友网络#朋友密钥"
+  -n 192.168.2.0/24
 
-# 多节点 + 多子网 + 多私有组
+# 2) 多节点 + 多子网 + 多私有组（值重复几次就是几个参数）
 easytier-lite \
   --network-name 你的网络名 \
   --network-secret 你的密钥 \
@@ -354,28 +383,47 @@ easytier-lite \
   -n 192.168.2.0/24 -n 192.168.3.0/24 \
   --private-group "朋友网络#朋友密钥" --private-group "公司#另一个密钥"
 
-# 不想手填 IP: 用 -d 让网络内开了 DHCP 的节点自动分配（IPv4 必须留空）
+# 3) 子网映射：把对端 10.0.0.0/24 映射到本机可达的 192.168.2.0/24
+easytier-lite \
+  --network-name 你的网络名 \
+  --network-secret 你的密钥 \
+  -n 192.168.2.0/24-&gt;10.0.0.0/24
+
+# 4) 不想手填 IP：-d 让网络内开了 DHCP 的节点自动分配（--ipv4 必须留空）
 easytier-lite \
   --network-name 你的网络名 \
   --network-secret 你的密钥 \
   -d \
   -p tcp://公网节点:11010
 
-# 要建虚拟网卡才加 --tun（默认不建）; 必须配 --ipv4 或 -d
+# 5) 要进虚拟网才加 --tun（默认不建），且必须已经有虚拟 IP（手填或 -d）
 easytier-lite \
   --network-name 你的网络名 \
   --network-secret 你的密钥 \
   -d --tun \
+  -p tcp://公网节点:11010
+
+# 6) 纯中继 / 只出不进：不加 IP、不加 --tun，再关掉监听
+easytier-lite \
+  --network-name 你的网络名 \
+  --network-secret 你的密钥 \
+  --no-listener \
   -p tcp://公网节点:11010</pre>
                                         <div style="margin-top: 6px; color: #777;">
-                                            说明: 本页只把 <b>已填</b> 的项拼进命令行；留空的项不会传。
-                                            “对等节点”“子网代理”“私有组”三个框里<b>填几个值就重复几次</b> <code>-p</code> / <code>-n</code> / <code>--private-group</code>，值之间用<b>空格</b>分隔。
-                                            单个值内部不能有空格（脚本按空格拆词，拆不开的写法会变成两个参数）。
-                                            <b>虚拟网卡 --tun 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开，且必须搭配一个虚拟 IP（手填或 -d）。
-                                            本机 IP 三种选法：<b>① 手填「本机 IPv4」</b>；② IPv4 留空 + 勾选「DHCP 自动分配 (-d)」，由网络内开 DHCP 的节点分一个；
-                                            ③ 两个都不选，本机没有虚拟 IP，仅当中继 / 子网代理用（此时虚拟网卡不会启用）。
-                                            若当前二进制不支持 --tun，脚本会自动跳过并在日志里注明，不影响隧道本身。
-                                            实际可执行版本每次“应用”后生成在 /tmp/easytier/run.sh。
+                                            <b>本页怎么拼命令行</b>：只把<b>已填 / 已勾</b>的项拼进去，留空的不传。
+                                            “对等节点”“子网代理”“私有组”三个框里<b>填几个值就重复几次</b> <code>-p</code> / <code>-n</code> / <code>--private-group</code>，值之间用<b>空格</b>分隔；
+                                            单个值内部不能有空格，否则会被拆成两个参数。
+                                            <br>
+                                            <b>本机 IP 三选一（互斥）</b>：<b>① 手填「本机 IPv4」</b> → 传 <code>--ipv4</code>；
+                                            ② IPv4 留空 + 勾「DHCP 自动分配 (-d)」→ 只传 <code>-d</code>；
+                                            ③ 两个都不选 → 本机没有虚拟 IP，仅当中继 / 子网代理用。填了 IPv4 又勾 -d 时<b>以静态 IP 为准</b>，不会两个都传。
+                                            <br>
+                                            <b>虚拟网卡 <code>--tun</code> 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开。
+                                            没有虚拟 IP 时即使勾了也不启用，脚本会写一行日志说明。
+                                            <br>
+                                            <b>监听口</b>：不填 <code>-l</code> 时默认监听 <code>tcp+udp 0.0.0.0:11010</code>，公网可直连的节点需要保留；只想出连不想被连，用 <code>--no-listener</code>。
+                                            <br>
+                                            实际执行的命令每次“应用”后生成在 <code>/tmp/easytier/run.sh</code>，跑起来后可用 <code>tail -f /tmp/easytier.log</code> 看启动参数与错误。
                                         </div>
                                     </div>
 
