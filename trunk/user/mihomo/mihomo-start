@@ -94,6 +94,8 @@ STATF=/tmp/mihomo/.slimstat
 FETCH_STAT=/tmp/mihomo/.fetch_status
 # 当前跑的是真实订阅还是内置兜底: normal / fallback
 MODE_STAT=/tmp/mihomo/.mode
+RETRY_PID=$RUNDIR/.retry.pid          # 兜底重试循环的 pid
+RETRY_WAIT=300                        # 兜底模式下重试间隔(秒)
 LOG=/tmp/mihomo.log
 
 ET_BIN=/usr/bin/easytier-core
@@ -645,7 +647,8 @@ do_start() {
 	done
 	pidof mihomo >/dev/null || { log "启动失败, 查看日志: $LOG"; tail -5 "$LOG"; exit 1; }
 	if [ "$(cat "$MODE_STAT" 2>/dev/null)" = "fallback" ]; then
-		log "兜底模式: 不接管流量 (未下发 iptables), 修好订阅后执行 mihomo-start update"
+		log "兜底模式: 不接管流量, 每 $((RETRY_WAIT/60)) 分钟自动重试拉取订阅 (也可手动 mihomo-start update)"
+		nohup retry_daemon >/dev/null 2>&1 &
 	else
 		fw_start
 	fi
@@ -678,6 +681,44 @@ run_update() {
 	fi
 }
 
+# ---------------------------------------------------------------------------
+# 兜底重试: fallback 空配置启动后, 每 RETRY_WAIT 秒自动再拉一次订阅
+#   场景: 开机自启时 WAN/DNS 还没就绪, 第一拉必失败, 掉进兜底后本来没有任何
+#   东西会再碰订阅 —— 面板看起来正常、流量却不接管, 极难被发现。
+#   退出条件(任一): 拉取成功 / mihomo 已不在运行(用户手动 stop) / 当前已是
+#   normal(用户手动 update 成功) / 订阅地址被清空(不空转)。
+#   注意: 绝不能在 do_stop 里 kill 本循环 —— run_update 的成功路径会调用
+#   do_stop, 而此刻执行 run_update 的正是循环进程本身, 那等于在 do_start 之前
+#   把自己杀掉, mihomo 就没人拉了。所以循环只靠自检退出, do_stop 不碰它。
+# ---------------------------------------------------------------------------
+retry_daemon() {
+	[ -f "$RETRY_PID" ] && kill -0 "$(cat "$RETRY_PID" 2>/dev/null)" 2>/dev/null && return 0
+	echo $$ > "$RETRY_PID"
+	n=0
+	while :; do
+		sleep "$RETRY_WAIT"
+		# 每轮先自检, 四种情况退出
+		pidof mihomo >/dev/null 2>&1 || break
+		[ "$(cat "$MODE_STAT" 2>/dev/null)" = "fallback" ] || break
+		SUB_URL=$(sub_url_get) || break
+		[ -n "$SUB_URL" ] || break
+		# DNS 没就绪就白拉一轮还刷日志, 先探一条再决定
+		if ! nslookup www.baidu.com >/dev/null 2>&1; then
+			n=$((n+1))
+			continue
+		fi
+		n=$((n+1))
+		log "兜底重试 #$n: 再次拉取订阅..."
+		if run_update; then
+			log "兜底重试成功: 已切换到订阅配置并接管流量"
+			break
+		fi
+		log "兜底重试 #$n 失败, $RETRY_WAIT 秒后再试"
+	done
+	rm -f "$RETRY_PID"
+}
+
+
 case "$1" in
 	update) run_update ;;
 	restart) do_stop; sleep 1; do_start ;;
@@ -701,7 +742,7 @@ case "$1" in
 			echo "running pid $(pidof mihomo)"
 			echo "DNS 模式: $(dns_mode)"
 			case "$(cat "$MODE_STAT" 2>/dev/null)" in
-				fallback) echo "配置: 内置兜底 (订阅未拉到, 流量未接管)" ;;
+				fallback) echo "配置: 内置兜底 (每 $((RETRY_WAIT/60)) 分钟自动重试拉订阅)" ;;
 				*)        echo "配置: 正常订阅" ;;
 			esac
 		else
