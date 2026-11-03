@@ -98,12 +98,10 @@ RETRY_PID=$RUNDIR/.retry.pid          # 兜底重试循环的 pid
 RETRY_WAIT=300                        # 兜底模式下重试间隔(秒)
 LOG=/tmp/mihomo.log
 
-ET_BIN=/usr/bin/easytier-core
-ET_CONF=/etc/storage/easytier/config.toml
-ET_LOG=/tmp/easytier.log
-
 # ---- 端口约定 (与下方 iptables 规则一一对应, 改这里需同步改规则) ----
-PROXY_PORT=7892      # TCP REDIRECT + UDP TPROXY 共用
+PROXY_PORT=7892      # TCP REDIRECT (透明代理 TCP 入口)
+TPROXY_PORT=7894     # UDP TPROXY (必须与 redir-port 分开: mihomo 的 tproxy
+                     # 监听会同时占 TCP, 与 redir-port 撞车会 bind 失败, UDP 全废)
 DNS_PORT=8053        # mihomo 内置 DNS 监听
 HTTP_PORT=7893       # mixed-port (浏览器手动填代理用)
 MARK=1               # fwmark
@@ -315,7 +313,7 @@ write_fallback_cfg() {
 # 下次 update 拉到真实订阅后会被整份覆盖, 手改这里没有意义
 mixed-port: $HTTP_PORT
 redir-port: $PROXY_PORT
-tproxy-port: $PROXY_PORT
+tproxy-port: $TPROXY_PORT
 allow-lan: true
 bind-address: '*'
 mode: rule
@@ -479,14 +477,14 @@ do_fetch() {
 		-e "s/^external-ui:.*/external-ui: \/usr\/share\/mihomo\/ui/" \
 		-e "s/^mixed-port:.*/mixed-port: $HTTP_PORT/" \
 		-e "s/^redir-port:.*/redir-port: $PROXY_PORT/" \
-		-e "s/^tproxy-port:.*/tproxy-port: $PROXY_PORT/" \
+		-e "s/^tproxy-port:.*/tproxy-port: $TPROXY_PORT/" \
 		"$CFG_NEW"
 	# 键不存在则插入
 	grep -q "^external-controller:" "$CFG_NEW" || sed -i "1i external-controller: 0.0.0.0:9090" "$CFG_NEW"
 	grep -q "^external-ui:" "$CFG_NEW" || sed -i "1i external-ui: /usr/share/mihomo/ui" "$CFG_NEW"
 	grep -q "^mixed-port:"  "$CFG_NEW" || sed -i "1i mixed-port: $HTTP_PORT"  "$CFG_NEW"
 	grep -q "^redir-port:"  "$CFG_NEW" || sed -i "1i redir-port: $PROXY_PORT"  "$CFG_NEW"
-	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $PROXY_PORT" "$CFG_NEW"
+	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $TPROXY_PORT" "$CFG_NEW"
 	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向; 模式由 mh_fakeip 开关决定
 	DNS_MODE=$(dns_mode)
 	if grep -q "^dns:" "$CFG_NEW"; then
@@ -574,7 +572,7 @@ fw_start() {
 
 	iptables -t nat    -A MIHOMO_TCP -p tcp -j REDIRECT --to-ports $PROXY_PORT
 	iptables -t mangle -A MIHOMO_UDP -p udp -m mark ! --mark $MARK \
-	                   -j TPROXY --on-port $PROXY_PORT --tproxy-mark $MARK
+	                   -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $MARK
 	# DNS 劫持: LAN 发往任意地址的 53 端口 -> mihomo DNS
 	iptables -t nat    -A MIHOMO_DNS -p udp --dport 53 -j REDIRECT --to-ports $DNS_PORT
 	iptables -t nat    -A MIHOMO_DNS -p tcp --dport 53 -j REDIRECT --to-ports $DNS_PORT
@@ -583,7 +581,7 @@ fw_start() {
 	iptables -t nat    -I PREROUTING -j MIHOMO_TCP
 	iptables -t mangle -I PREROUTING -j MIHOMO_UDP
 	iptables -t nat    -I PREROUTING -j MIHOMO_DNS
-	log "防火墙规则已下发 (TCP REDIRECT->$PROXY_PORT, UDP TPROXY->$PROXY_PORT, DNS->$DNS_PORT)"
+	log "防火墙规则已下发 (TCP REDIRECT->$PROXY_PORT, UDP TPROXY->$TPROXY_PORT, DNS->$DNS_PORT)"
 }
 
 fw_stop() {
@@ -596,33 +594,6 @@ fw_stop() {
 	ip rule del fwmark $MARK table $RT_TABLE 2>/dev/null
 	ip route del local 0.0.0.0/0 dev lo table $RT_TABLE 2>/dev/null
 	log "防火墙规则已清理"
-}
-
-# ---------------------------------------------------------------------------
-# EasyTier: 二进制和配置都在才启动, 缺一个就安静跳过 (不阻塞 mihomo)
-# ---------------------------------------------------------------------------
-et_start() {
-	[ -x "$ET_BIN" ] || return 0
-	[ -f "$ET_CONF" ] || { log "EasyTier 已编入但无配置 ($ET_CONF), 跳过"; return 0; }
-	RUNNING=$(pidof easytier-core)
-	[ -n "$RUNNING" ] && { log "EasyTier 已在运行 (pid $RUNNING)"; return 0; }
-	# 128MB 机器保命参数, 与 mihomo 同理
-	GOMEMLIMIT="${EASYTIER_MEMLIMIT:-32MiB}" GOGC=50 GOMAXPROCS=2 \
-		nohup "$ET_BIN" -c "$ET_CONF" >>"$ET_LOG" 2>&1 &
-	sleep 1
-	if pidof easytier-core >/dev/null; then
-		log "EasyTier 已启动 (pid $(pidof easytier-core)), 配置: $ET_CONF"
-	else
-		log "EasyTier 启动失败, 查看日志: $ET_LOG"
-		tail -5 "$ET_LOG" 2>/dev/null
-	fi
-}
-
-et_stop() {
-	[ -x "$ET_BIN" ] || return 0
-	pidof easytier-core >/dev/null || return 0
-	killall easytier-core 2>/dev/null
-	log "EasyTier 已停止"
 }
 
 do_start() {
@@ -663,11 +634,19 @@ do_start() {
 	pidof mihomo >/dev/null || { log "启动失败, 查看日志: $LOG"; tail -5 "$LOG"; exit 1; }
 	if [ "$(cat "$MODE_STAT" 2>/dev/null)" = "fallback" ]; then
 		log "兜底模式: 不接管流量, 每 $((RETRY_WAIT/60)) 分钟自动重试拉取订阅 (也可手动 mihomo-start update)"
-		nohup retry_daemon >/dev/null 2>&1 &
+		# 不能用 nohup retry_daemon: nohup 是外部程序, 无法执行 shell 函数,
+		# 实测报 "nohup: can't execute 'retry_daemon'", stderr 又被丢进 /dev/null,
+		# 表现为兜底重试完全没动静。改成子 shell 后台 + 屏蔽 HUP, 由父进程记 pid。
+		if [ -f "$RETRY_PID" ] && kill -0 "$(cat "$RETRY_PID" 2>/dev/null)" 2>/dev/null; then
+			log "兜底重试守护已在运行 (pid $(cat "$RETRY_PID"))"
+		else
+			( trap '' HUP; retry_daemon ) >/dev/null 2>&1 </dev/null &
+			echo $! > "$RETRY_PID"
+			log "兜底重试守护已启动 (pid $(cat "$RETRY_PID")), 首轮 $((RETRY_WAIT/60)) 分钟后"
+		fi
 	else
 		fw_start
 	fi
-	et_start
 	log "已启动 (pid $(pidof mihomo)), 订阅: $SUB_URL_FILE, 自定义sed: $USER_SED"
 	# YACD 面板: 静态资源由固件编入 /usr/share/mihomo/ui, 由配置里的 external-ui 指过去
 	LANIP=$(nvram get lan_ipaddr 2>/dev/null)
@@ -676,7 +655,6 @@ do_start() {
 }
 
 do_stop() {
-	et_stop
 	killall mihomo 2>/dev/null
 	fw_stop
 }
@@ -707,8 +685,7 @@ run_update() {
 #   把自己杀掉, mihomo 就没人拉了。所以循环只靠自检退出, do_stop 不碰它。
 # ---------------------------------------------------------------------------
 retry_daemon() {
-	[ -f "$RETRY_PID" ] && kill -0 "$(cat "$RETRY_PID" 2>/dev/null)" 2>/dev/null && return 0
-	echo $$ > "$RETRY_PID"
+	# pid 文件由调用方用 $! 写入: 子 shell 里 $$ 仍是父 shell 的 pid, 写进来会指错进程
 	n=0
 	while :; do
 		sleep "$RETRY_WAIT"
@@ -720,6 +697,8 @@ retry_daemon() {
 		# DNS 没就绪就白拉一轮还刷日志, 先探一条再决定
 		if ! nslookup www.baidu.com >/dev/null 2>&1; then
 			n=$((n+1))
+			# 每 12 轮(1 小时)提示一次, 免得 DNS 长期不通时日志里一片寂静
+			[ $((n % 12)) -eq 1 ] && log "兜底重试 #$n: DNS 还没就绪, 本轮跳过"
 			continue
 		fi
 		n=$((n+1))
@@ -798,8 +777,6 @@ case "$1" in
 			*) echo "用法: mihomo-start fakeip [on|off|status]"; exit 1 ;;
 		esac
 		;;
-	et-start) et_start ;;
-	et-stop)  et_stop ;;
 	slim)
 		case "$2" in
 			on)
