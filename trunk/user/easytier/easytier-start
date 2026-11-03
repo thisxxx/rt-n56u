@@ -104,18 +104,23 @@ do_start() {
 	# DHCP 自动获取虚拟 IP (-d/--dhcp): 只在 IPv4 留空时生效, 由网络内开 DHCP 的节点分一个;
 	# 填了静态 IP 就不传, 避免两种来源打架
 	[ "$(get et_dhcp)" = "1" ] && [ -z "$IP" ] && set -- "$@" -d
-	# 虚拟网卡: 0.2.7 的 easytier-lite 不认 --tun (精简解析器没有这个参数, 传了会直接启动失败),
-	# 正确参数待确认; 定下来后只改下面 TUN_ARG 这一行, 其余逻辑不用动。
-	TUN_ARG=""
+	# 虚拟网卡 (--tun): lite 版默认关; 开启需要 ①二进制认这个参数 ②本机有 IP 来源 ③/dev/net/tun 设备节点
+	# 老版本 lite 不认 --tun, 传了会直接 bail("unknown argument") 导致整个进程起不来,
+	# 所以这里先用 --help 探一次, 不认就跳过, 不让一个可选功能把整条隧道搞死
 	if [ "$(get et_tun)" = "1" ]; then
-		if [ -n "$IP" ] || [ "$(get et_dhcp)" = "1" ]; then
-			if [ -n "$TUN_ARG" ]; then
-				set -- "$@" $TUN_ARG
-			else
-				log "提示: 已勾选虚拟网卡, 但当前 easytier-lite 版本的参数未确认, 本次不下发"
-			fi
-		else
+		if [ -z "$IP" ] && [ "$(get et_dhcp)" != "1" ]; then
 			log "提示: 未填 IPv4 且未勾 DHCP(无 IP 来源), 虚拟网卡不启用"
+		elif ! "$BIN" --help 2>&1 | grep -q -- "--tun"; then
+			log "提示: 当前 easytier-lite 版本不支持 --tun, 本次跳过 (版本: $("$BIN" -V 2>&1 | head -1))"
+		else
+			# 内核有 CONFIG_TUN=y, 但 Padavan 的 /dev 不一定有 net/tun 这个节点, 缺了就自己建
+			if [ ! -c /dev/net/tun ]; then
+				mkdir -p /dev/net
+				mknod /dev/net/tun c 10 200 2>/dev/null && chmod 600 /dev/net/tun
+				log "已创建设备节点 /dev/net/tun"
+			fi
+			set -- "$@" --tun
+			log "虚拟网卡: 已启用 --tun"
 		fi
 	fi
 
