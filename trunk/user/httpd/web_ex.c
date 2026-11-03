@@ -3063,12 +3063,10 @@ mihomo_rules_get_hook(int eid, webs_t wp, int argc, char **argv)
 
 	fp = fopen(MH_CFG, "r");
 	if (!fp) {
-		websWrite(wp, "# 未找到当前配置 %s
-# mihomo 未启动过, 或还在使用兜底空配置", MH_CFG);
+		websWrite(wp, "# 未找到当前配置 %s\n# mihomo 未启动过, 或还在使用兜底空配置", MH_CFG);
 		return 0;
 	}
-	websWrite(wp, "# 共 %d 条规则, 第 %d / %d 页 (每页 %d 条)
-",
+	websWrite(wp, "# 共 %d 条规则, 第 %d / %d 页 (每页 %d 条)\n",
 		total, page, pages, MH_RULES_PAGE_SIZE);
 	while (fgets(line, sizeof(line), fp)) {
 		if (line[0] != ' ' && line[0] != '	' && line[0] != '-') {
