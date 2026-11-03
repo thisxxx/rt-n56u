@@ -2201,6 +2201,12 @@ start_firewall_ex(void)
 	if (check_if_file_exist(opt_iptables_script))
 		doSystem("%s update", opt_iptables_script);
 
+	/* EasyTier: tun 网卡的放行/转发/MASQUERADE 由固件自带脚本维护。
+	 * 放在用户脚本之后执行, 保证 WAN 重拨或防火墙重启后自动重放;
+	 * 脚本内部只操作自有链表 EASYTIER_IN/EASYTIER_FWD, 幂等且不碰别的规则 */
+	if (check_if_file_exist("/usr/bin/easytier-firewall"))
+		doSystem("/usr/bin/easytier-firewall apply >/dev/null 2>&1");
+
 	/* enable IPv4 forward */
 	set_ipv4_forward(1);
 
