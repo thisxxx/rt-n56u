@@ -960,6 +960,15 @@
 			{"et_peers", "", NULL, EVM_BLOCK_UNSAFE},
 			{"et_subnets", "", NULL, EVM_BLOCK_UNSAFE},
 			{"et_private_groups", "", NULL, EVM_BLOCK_UNSAFE},
+			/* 以下 6 项是后加的参数开关, 必须登记在这里, 否则 validate_asp_apply()
+			 * 根本不会把它们写进 nvram(它只遍历 GetVariables(sid) 的表) —— 页面看着
+			 * 生效了、日志也刷新了, 实际 nvram 一个字没变 */
+			{"et_dhcp", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_tun", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_hostname", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_listeners", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_no_listener", "", NULL, EVM_BLOCK_UNSAFE},
+			{"et_log_level", "", NULL, EVM_BLOCK_UNSAFE},
 			{0,0,0,0}
 		};
 
