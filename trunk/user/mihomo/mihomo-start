@@ -170,14 +170,14 @@ do_slim() {
 	#   slim.conf SLIM=1  命令行 mihomo-start slim on
 	ENABLED=0
 	[ "$(nvram get mh_slim 2>/dev/null)" = "1" ] && ENABLED=1
-	# 参数优先级: slim.conf 快照 > nvram(面板) > 内置默认
-	# 快照只是 nvram 的缓存, 而 /etc/storage 需要 mtd_storage.sh save 才落盘,
-	# 重启后快照可能丢; 这种情况下直接读 nvram, 面板上调过的参数不会退回默认
-	SLIM_DEDUP=$(slim_nv mh_slim_dedup 1)
-	SLIM_CUT_AFTER_MATCH=$(slim_nv mh_slim_cut 1)
-	SLIM_DISABLE_SNIFFER=$(slim_nv mh_slim_sniff 1)
-	SLIM_DNS_MAX=$(slim_nv mh_slim_dnsmax 3)
-	SLIM_GEO_AUTOUPDATE=$(slim_nv mh_slim_geoupd 0)
+	# 参数固定为内置默认 (面板上的 5 个下拉开关已移除, 精简细节改由
+	# mh_slim_text 文本框整段接管; 这里保留读 slim.conf 的 SLIM=1 总开关,
+	# 命令行 mihomo-start slim on/off 依旧可用)
+	SLIM_DEDUP=1
+	SLIM_CUT_AFTER_MATCH=1
+	SLIM_DISABLE_SNIFFER=1
+	SLIM_DNS_MAX=3
+	SLIM_GEO_AUTOUPDATE=0
 	if [ -f "$SLIM_CONF" ]; then
 		# shellcheck disable=SC1090
 		. "$SLIM_CONF" 2>/dev/null
@@ -503,7 +503,22 @@ do_fetch() {
 	grep -q "^geo-auto-update:" "$CFG_NEW" || sed -i "1i geo-auto-update: false" "$CFG_NEW"
 
 	# ---- 订阅精简 (开关: $SLIM_CONF 内 SLIM=1; 在用户钩子之前, 用户改动不会被覆盖) ----
-	do_slim "$CFG_NEW" || log "精简未生效, 按原配置继续"
+	# 精简二选一: mh_slim_text 非空 -> 用户 sed 整段替代内置精简 (sed -f 语法)
+	#            mh_slim_text 为空 -> 内置默认精简; 用户 sed 出错回退内置
+	SLIMTXT=$(nvram get mh_slim_text 2>/dev/null | tr -d '\r')
+	if [ "$(nvram get mh_slim 2>/dev/null)" = "1" ] && [ -n "$SLIMTXT" ]; then
+		printf '%s\n' "$SLIMTXT" > "$RUNDIR/slim_user.sed"
+		if sed -f "$RUNDIR/slim_user.sed" "$CFG_NEW" > "$CFG_NEW.slim" 2>>"$LOG"; then
+			mv -f "$CFG_NEW.slim" "$CFG_NEW"
+			log "订阅精简: 用户自定义 sed 已生效 (替代内置精简, $(grep -c . "$RUNDIR/slim_user.sed") 行指令)"
+		else
+			rm -f "$CFG_NEW.slim"
+			log "警告: 用户精简 sed 执行出错, 回退内置精简"
+			do_slim "$CFG_NEW" || log "精简未生效, 按原配置继续"
+		fi
+	else
+		do_slim "$CFG_NEW" || log "精简未生效, 按原配置继续"
+	fi
 
 	# ---- 用户自定义 sed 钩子: 每次更新规则后必执行 ----
 	if [ -x "$USER_SED" ]; then
