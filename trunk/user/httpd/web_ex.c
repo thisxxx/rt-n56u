@@ -2957,7 +2957,7 @@ mihomo_log_hook(int eid, webs_t wp, int argc, char **argv)
  * 只读: 从当前生效配置 /tmp/mihomo/config.yaml 里抽 rules: 段与统计,
  * 不碰任何配置。fallback 兜底模式下文件里只有 MATCH 一条, 如实显示。
  * ------------------------------------------------------------------ */
-#define MH_RULES_MAX_LINES	1000
+#define MH_RULES_PAGE_SIZE	500
 
 static void
 mihomo_cfg_stats(int *rules, int *proxies)
@@ -3005,24 +3005,77 @@ mihomo_rules_stat_hook(int eid, webs_t wp, int argc, char **argv)
 	return 0;
 }
 
-/* <% mihomo_rules_get(); %>  rules: 段全文 (转义, 截断到 1000 行) */
+/* rules: 段条数统计 (分页两遍扫描共用) */
+static int
+mihomo_rules_count(void)
+{
+	FILE *fp;
+	char line[512];
+	int in_rules = 0, total = 0;
+
+	fp = fopen(MH_CFG, "r");
+	if (!fp)
+		return 0;
+	while (fgets(line, sizeof(line), fp)) {
+		if (line[0] != ' ' && line[0] != '	' && line[0] != '-') {
+			if (!strncmp(line, "rules:", 6)) { in_rules = 1; continue; }
+			if (in_rules)
+				break;		/* 下一个顶层键, rules 段结束 */
+			continue;
+		}
+		if (in_rules)
+			total++;
+	}
+	fclose(fp);
+	return total;
+}
+
+/* <% mihomo_rules_pages(); %>  总页数 (整数, 分页 JS 用) */
+static int
+mihomo_rules_pages_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	int pages = (mihomo_rules_count() + MH_RULES_PAGE_SIZE - 1) / MH_RULES_PAGE_SIZE;
+	websWrite(wp, "%d", pages < 1 ? 1 : pages);
+	return 0;
+}
+
+/* <% mihomo_rules_get(); %>  rules: 段分页输出 (URL ?page=N, 每页 500 条) */
 static int
 mihomo_rules_get_hook(int eid, webs_t wp, int argc, char **argv)
 {
 	FILE *fp;
 	char line[512];
-	int in_rules = 0, shown = 0, total = 0;
+	char *p;
+	int in_rules = 0, total, pages, page, skip, shown = 0;
+
+	total = mihomo_rules_count();
+	pages = (total + MH_RULES_PAGE_SIZE - 1) / MH_RULES_PAGE_SIZE;
+	if (pages < 1)
+		pages = 1;
+
+	p = websGetVar(wp, "page", "1");
+	page = atoi(p ? p : "1");
+	if (page < 1)
+		page = 1;
+	if (page > pages)
+		page = pages;
+	skip = (page - 1) * MH_RULES_PAGE_SIZE;
 
 	fp = fopen(MH_CFG, "r");
 	if (!fp) {
-		websWrite(wp, "# 未找到当前配置 %s\n# mihomo 未启动过, 或还在使用兜底空配置", MH_CFG);
+		websWrite(wp, "# 未找到当前配置 %s
+# mihomo 未启动过, 或还在使用兜底空配置", MH_CFG);
 		return 0;
 	}
+	websWrite(wp, "# 共 %d 条规则, 第 %d / %d 页 (每页 %d 条)
+",
+		total, page, pages, MH_RULES_PAGE_SIZE);
 	while (fgets(line, sizeof(line), fp)) {
-		if (line[0] != ' ' && line[0] != '\t' && line[0] != '-') {
+		if (line[0] != ' ' && line[0] != '	' && line[0] != '-') {
 			if (!strncmp(line, "rules:", 6)) {
 				in_rules = 1;
-				easytier_html_escape(wp, line);
+				if (page == 1)
+					easytier_html_escape(wp, line);
 				continue;
 			}
 			if (in_rules)
@@ -3031,18 +3084,16 @@ mihomo_rules_get_hook(int eid, webs_t wp, int argc, char **argv)
 		}
 		if (!in_rules)
 			continue;
-		total++;
-		if (shown < MH_RULES_MAX_LINES) {
-			easytier_html_escape(wp, line);
-			shown++;
-		}
+		if (skip > 0) { skip--; continue; }
+		if (shown >= MH_RULES_PAGE_SIZE)
+			break;
+		easytier_html_escape(wp, line);
+		shown++;
 	}
 	fclose(fp);
-	if (total > shown)
-		websWrite(wp, "\n# ... 其余 %d 条未显示 (上限 %d 行)\n",
-			total - shown, MH_RULES_MAX_LINES);
 	return 0;
 }
+
 
 /* <% mihomo_action(); %>  由 Advanced_Mihomo_action.asp 调用
  *
@@ -5268,6 +5319,7 @@ struct ej_handler ej_handlers[] =
 	{ "mihomo_action",		mihomo_action_hook},
 { "mihomo_rules_stat",	mihomo_rules_stat_hook},
 { "mihomo_rules_get",	mihomo_rules_get_hook},
+{ "mihomo_rules_pages",	mihomo_rules_pages_hook},
 	{ NULL, NULL }
 };
 
