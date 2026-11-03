@@ -125,8 +125,15 @@ do_start() {
 				mknod /dev/net/tun c 10 200 2>/dev/null && chmod 600 /dev/net/tun
 				log "已创建设备节点 /dev/net/tun"
 			fi
-			set -- "$@" --tun
-			log "虚拟网卡: 已启用 --tun"
+			# mknod 成功不代表内核能用: 节点建得出来但 misc 设备没注册时 open() 照样
+			# 返回 ENODEV, 进程会当场退出. 所以这里真开一次做验证, 不通就主动跳过,
+			# 不能让一个可选功能把整条隧道搞死
+			if ( : <>/dev/net/tun ) 2>/dev/null; then
+				set -- "$@" --tun
+				log "虚拟网卡: 已启用 --tun"
+			else
+				log "错误: /dev/net/tun 打不开(内核未编 TUN 或节点无效), 本次跳过 --tun"
+			fi
 		fi
 	fi
 
@@ -189,6 +196,8 @@ do_start() {
 	if ! running; then
 		log "EasyTier 启动失败, 日志末尾:"
 		tail -n 5 "$LOG" 2>/dev/null
+		# 面板只读 $LOG, 上面两句只进 syslog 和 stdout(被 doSystem 丢掉), 补一行进文件
+		echo "=== easytier-start: 启动失败, 上面 5 行是原因 ===" >>"$LOG" 2>/dev/null
 		return 1
 	fi
 
