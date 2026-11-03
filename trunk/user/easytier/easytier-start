@@ -104,8 +104,15 @@ do_start() {
 	# DHCP 自动获取虚拟 IP (-d/--dhcp): 只在 IPv4 留空时生效, 由网络内开 DHCP 的节点分一个;
 	# 填了静态 IP 就不传, 避免两种来源打架
 	[ "$(get et_dhcp)" = "1" ] && [ -z "$IP" ] && set -- "$@" -d
-	# 虚拟网卡 (--tun): lite 版默认不建 TUN (省内存, 只当中继/子网代理); 需要进虚拟网才打开
-	[ "$(get et_tun)" = "1" ] && set -- "$@" --tun
+	# 虚拟网卡 (--tun): lite 版默认不建 TUN (省内存, 只当中继/子网代理); 需要进虚拟网才打开。
+	# 没有 IP 来源(IPv4 留空且未勾 DHCP)时强制不传 --tun: 无 IP 的 TUN 网卡没有意义
+	if [ "$(get et_tun)" = "1" ]; then
+		if [ -n "$IP" ] || [ "$(get et_dhcp)" = "1" ]; then
+			set -- "$@" --tun
+		else
+			log "提示: 未填 IPv4 且未勾 DHCP(无 IP 来源), --tun 已忽略"
+		fi
+	fi
 
 	# ---- 可重复参数: 一个值一个开关 ----
 	# $ET_xxx 故意【不加引号】: 加了引号整串只算一个 argv, 就不是"可重复"了。
