@@ -984,6 +984,8 @@
 			{"mh_slim_dnsmax", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_slim_geoupd", "", NULL, EVM_BLOCK_UNSAFE},
 			{"mh_action", "", NULL, EVM_BLOCK_UNSAFE},
+			/* 订阅精简的用户自定义 sed 程序 (多行); 非空时整段替代内置精简 */
+			{"mh_slim_text", "", NULL, EVM_BLOCK_UNSAFE},
 			{0,0,0,0}
 		};
 
