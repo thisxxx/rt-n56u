@@ -26,13 +26,15 @@
 
 var $j = jQuery.noConflict();
 
-function initial(){
+	function initial(){
 	show_banner(1);
 	show_menu(5, 8, 4);
 	show_footer();
 
 	init_itoggle('et_enable');
 	init_itoggle('et_autostart');
+	init_itoggle('et_dhcp');
+	init_itoggle('et_tun');
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -242,6 +244,38 @@ function refresh_state(){
                                         </tr>
 
                                         <tr>
+                                            <th>DHCP 自动分配虚拟 IP <code>-d</code><br><span style="font-weight: normal; color: #999;">仅 IPv4 留空时生效</span></th>
+                                            <td>
+                                                <div class="main_itoggle">
+                                                    <div id="et_dhcp_on_of">
+                                                        <input type="checkbox" id="et_dhcp_fake" <% nvram_match_x("", "et_dhcp", "1", "value=1 checked"); %><% nvram_match_x("", "et_dhcp", "0", "value=0"); %>>
+                                                    </div>
+                                                </div>
+                                                <div style="position: absolute; margin-left: -10000px;">
+                                                    <input type="radio" value="1" name="et_dhcp" id="et_dhcp_1" <% nvram_match_x("", "et_dhcp", "1", "checked"); %>><#checkbox_Yes#>
+                                                    <input type="radio" value="0" name="et_dhcp" id="et_dhcp_0" <% nvram_match_x("", "et_dhcp", "0", "checked"); %>><#checkbox_No#>
+                                                </div>
+                                                <span style="color: #999; margin-left: 8px;">IPv4 留空时勾选，由网络内开了 DHCP 的节点自动分一个虚拟 IP，本机就不用手填</span>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
+                                            <th>虚拟网卡 <code>--tun</code><br><span style="font-weight: normal; color: #999;">默认关</span></th>
+                                            <td>
+                                                <div class="main_itoggle">
+                                                    <div id="et_tun_on_of">
+                                                        <input type="checkbox" id="et_tun_fake" <% nvram_match_x("", "et_tun", "1", "value=1 checked"); %><% nvram_match_x("", "et_tun", "0", "value=0"); %>>
+                                                    </div>
+                                                </div>
+                                                <div style="position: absolute; margin-left: -10000px;">
+                                                    <input type="radio" value="1" name="et_tun" id="et_tun_1" <% nvram_match_x("", "et_tun", "1", "checked"); %>><#checkbox_Yes#>
+                                                    <input type="radio" value="0" name="et_tun" id="et_tun_0" <% nvram_match_x("", "et_tun", "0", "checked"); %>><#checkbox_No#>
+                                                </div>
+                                                <span style="color: #999; margin-left: 8px;">创建虚拟网卡；本机需要有虚拟 IP（手填 IPv4 或勾 DHCP 二选一），只当中继就不用开</span>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
                                             <th>对等节点 <code>-p</code><br><span style="font-weight: normal; color: #999;">可多份，多个用空格分隔</span></th>
                                             <td>
                                                 <input type="text" class="input" size="60" style="width: 92%;" maxlength="512" name="et_peers" value="<% nvram_get_x("","et_peers"); %>" placeholder="tcp://公网节点:11010 tcp://另一个节点:11010">
@@ -314,11 +348,20 @@ easytier-lite \
   --ipv4 10.126.126.1/24 \
   -p tcp://公网节点1:11010 -p tcp://公网节点2:11010 \
   -n 192.168.2.0/24 -n 192.168.3.0/24 \
-  --private-group "朋友网络#朋友密钥" --private-group "公司#另一个密钥"</pre>
+  --private-group "朋友网络#朋友密钥" --private-group "公司#另一个密钥"
+
+# 需要虚拟网卡时追加 --tun; 不想手填 IP 就用 -d 让网络内 DHCP 节点自动分配
+easytier-lite \
+  --network-name 你的网络名 \
+  --network-secret 你的密钥 \
+  -d --tun \
+  -p tcp://公网节点:11010</pre>
                                         <div style="margin-top: 6px; color: #777;">
                                             说明: 本页只把 <b>已填</b> 的项拼进命令行；留空的项不会传。
                                             “对等节点”“子网代理”“私有组”三个框里<b>填几个值就重复几次</b> <code>-p</code> / <code>-n</code> / <code>--private-group</code>，值之间用<b>空格</b>分隔。
                                             单个值内部不能有空格（脚本按空格拆词，拆不开的写法会变成两个参数）。
+                                            <b>虚拟网卡 --tun 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开，
+                                            且本机必须有虚拟 IP —— <b>手填「本机 IPv4」或勾选「DHCP 自动分配 (-d)」二选一</b>（-d 只在 IPv4 留空时生效，由网络内开 DHCP 的节点分 IP）。
                                             实际可执行版本每次“应用”后生成在 /tmp/easytier/run.sh。
                                         </div>
                                     </div>
