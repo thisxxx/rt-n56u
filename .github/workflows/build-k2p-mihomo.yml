@@ -430,7 +430,6 @@ jobs:
 
           cp -f "$TRX" /opt/images/K2P.trx
           cp -f size-report.md /opt/images/size-report.md
-          cd /opt/images && md5sum K2P.trx | tee md5sum.txt
 
           if [ "$SIZE" -gt "$MAX_TRX_SIZE" ]; then
             echo "::error::固件体积超限 $SIZE > $MAX_TRX_SIZE (15.0 MiB)，装不下，需要继续砍基座"
@@ -438,13 +437,31 @@ jobs:
           fi
           echo "体积校验通过：$SIZE <= $MAX_TRX_SIZE"
 
+          # ---- 交付命名: 裸 trx 直接给文件, 不套压缩包 ----
+          # 规则: K2P-<variant>-et<版本>.trx; 若仓库历史 release 里已有同名资产(同 easytier 版本多次构建),
+          # 自动加序号: K2P-full-et0.2.7-2.trx / -3.trx, 避免下载到本地互相覆盖
+          VARIANT="${{ inputs.variant || 'full' }}"
+          BASE="K2P-${VARIANT}-et${ET_VER}"
+          NAME="${BASE}.trx"
+          N=2
+          while curl -sf --retry 3 -H "Authorization: Bearer ${{ github.token }}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -e --arg n "$NAME" 'any(.[].assets[]?; .name == $n)' >/dev/null 2>&1; do
+            NAME="${BASE}-${N}.trx"
+            N=$((N+1))
+          done
+          echo "FW_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "最终固件名: $NAME"
+          cp -f /opt/images/K2P.trx "/opt/images/$NAME"
+          cd /opt/images && md5sum "$NAME" | tee md5sum.txt
+
       - name: 上传 artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: K2P-mihomo-${{ inputs.variant || 'full' }}-et${{ env.ET_VER }}-${{ github.sha }}
+          name: ${{ env.FW_NAME || 'K2P.trx' }}
           path: |
-            /opt/images/K2P.trx
+            /opt/images/${{ env.FW_NAME || 'K2P.trx' }}
             /opt/images/md5sum.txt
             /opt/images/size-report.md
           if-no-files-found: warn
@@ -471,6 +488,10 @@ jobs:
             内置 **未压缩** mihomo、easytier-lite **v${{ env.ET_VER }}** 与 yacd 面板静态资源（/usr/share/mihomo/ui）。
             各组件 raw 字节与 sha256 见 size-report.md（随本 release 一同发布）。
 
+            - 附件即刷机文件本身（裸 .trx，非压缩包），命名 `K2P-<变体>-et<easytier版本>.trx`；
+              同 easytier 版本重复构建时自动加序号（-2、-3），互不覆盖
+            - 校验：md5sum.txt；刷机：Breed → 固件更新 → 选本 trx
+
             - 模板：`trunk/configs/templates/K2P_nano.config`
             - squashfs 块 512 KiB（xz），Go 静态二进制压缩率明显改善
             - 源码 commit: ${{ github.sha }}
@@ -479,7 +500,7 @@ jobs:
               订阅地址写 `/etc/storage/mihomo/sub_url.txt`，
               面板 `http://<路由器IP>:9090/ui/`
           files: |
-            /opt/images/K2P.trx
+            /opt/images/${{ env.FW_NAME }}
             /opt/images/md5sum.txt
             /opt/images/size-report.md
           fail_on_unmatched_files: true
