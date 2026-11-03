@@ -35,6 +35,7 @@ var $j = jQuery.noConflict();
 	init_itoggle('et_autostart');
 	init_itoggle('et_dhcp');
 	init_itoggle('et_tun');
+	init_itoggle('et_no_listener');
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -280,6 +281,57 @@ function refresh_state(){
                                         </tr>
 
                                         <tr>
+                                            <th>主机名 <code>--hostname</code><br><span style="font-weight: normal; color: #999;">选填</span></th>
+                                            <td>
+                                                <input type="text" class="input" size="32" maxlength="64" name="et_hostname" value="<% nvram_get_x("","et_hostname"); %>" placeholder="k2p-客厅，留空=用系统名">
+                                                <div style="color: #999; margin-top: 4px;">本节点在 EasyTier 网络里的显示名，纯透传；留空则不传该参数，由内核用系统主机名。</div>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
+                                            <th>监听地址 <code>-l</code><br><span style="font-weight: normal; color: #999;">可多份，留空=默认</span></th>
+                                            <td>
+                                                <input type="text" class="input" size="60" style="width: 92%;" maxlength="512" name="et_listeners" value="<% nvram_get_x("","et_listeners"); %>" placeholder="tcp://0.0.0.0:11010 udp://0.0.0.0:11010">
+                                                <div style="color: #999; margin-top: 4px;">
+                                                    多个值用空格分隔，一个值一个 <code>-l</code>。
+                                                    <b>留空时不传该参数</b>，lite 的缺省值是 <code>tcp+udp 0.0.0.0:11010</code>（公网可直连的节点就留空）。
+                                                    勾了下面「不监听」时，这里填了也会被忽略。
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
+                                            <th>不监听 <code>--no-listener</code><br><span style="font-weight: normal; color: #999;">默认关</span></th>
+                                            <td>
+                                                <div class="main_itoggle">
+                                                    <div id="et_no_listener_on_of">
+                                                        <input type="checkbox" id="et_no_listener_fake" <% nvram_match_x("", "et_no_listener", "1", "value=1 checked"); %><% nvram_match_x("", "et_no_listener", "0", "value=0"); %>>
+                                                    </div>
+                                                </div>
+                                                <div style="position: absolute; margin-left: -10000px;">
+                                                    <input type="radio" value="1" name="et_no_listener" id="et_no_listener_1" <% nvram_match_x("", "et_no_listener", "1", "checked"); %>><#checkbox_Yes#>
+                                                    <input type="radio" value="0" name="et_no_listener" id="et_no_listener_0" <% nvram_match_x("", "et_no_listener", "0", "checked"); %>><#checkbox_No#>
+                                                </div>
+                                                <span style="color: #999; margin-left: 8px;">只主动出连、不接受入连（纯客户端 / 只出不进）；勾上后不再下发 <code>-l</code></span>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
+                                            <th>日志级别 <code>--console-log-level</code><br><span style="font-weight: normal; color: #999;">默认不传</span></th>
+                                            <td>
+                                                <select class="input" name="et_log_level" style="width: 180px;">
+                                                    <option value="" <% nvram_match_x("","et_log_level","","selected"); %>>（不传，用程序默认）</option>
+                                                    <option value="error" <% nvram_match_x("","et_log_level","error","selected"); %>>error（只报错）</option>
+                                                    <option value="warn" <% nvram_match_x("","et_log_level","warn","selected"); %>>warn</option>
+                                                    <option value="info" <% nvram_match_x("","et_log_level","info","selected"); %>>info</option>
+                                                    <option value="debug" <% nvram_match_x("","et_log_level","debug","selected"); %>>debug</option>
+                                                    <option value="trace" <% nvram_match_x("","et_log_level","trace","selected"); %>>trace（最详细，日志涨得快）</option>
+                                                </select>
+                                                <div style="color: #999; margin-top: 4px;">控制台日志级别，只影响写进 /tmp/easytier.log 的详细程度；排查连接问题时临时调到 debug。</div>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
                                             <th>对等节点 <code>-p</code><br><span style="font-weight: normal; color: #999;">可多份，多个用空格分隔</span></th>
                                             <td>
                                                 <input type="text" class="input" size="60" style="width: 92%;" maxlength="512" name="et_peers" value="<% nvram_get_x("","et_peers"); %>" placeholder="tcp://公网节点:11010 tcp://另一个节点:11010">
@@ -355,14 +407,14 @@ function refresh_state(){
                                             <tr><td style="padding: 2px 6px;"><code>--peers</code></td><td style="padding: 2px 6px;"><code>-p</code></td><td style="padding: 2px 6px;">对等节点地址，如 <code>tcp://公网节点:11010</code>，可重复</td><td style="padding: 2px 6px;">可填</td></tr>
                                             <tr><td style="padding: 2px 6px;"><code>--proxy-networks</code></td><td style="padding: 2px 6px;"><code>-n</code></td><td style="padding: 2px 6px;">子网代理，可重复；支持映射写法 <code>本网段-&gt;对端网段</code></td><td style="padding: 2px 6px;">可填</td></tr>
                                             <tr><td style="padding: 2px 6px;"><code>--private-group</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">私有模式白名单 <code>"网络名#密钥"</code>，可重复</td><td style="padding: 2px 6px;">可填</td></tr>
-                                            <tr><td style="padding: 2px 6px;"><code>--hostname</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">本节点显示名，纯透传，留空则用系统名</td><td style="padding: 2px 6px;">未提供</td></tr>
-                                            <tr><td style="padding: 2px 6px;"><code>--listeners</code></td><td style="padding: 2px 6px;"><code>-l</code></td><td style="padding: 2px 6px;">监听地址；<b>不填时缺省 <code>tcp+udp 0.0.0.0:11010</code></b></td><td style="padding: 2px 6px;">未提供</td></tr>
-                                            <tr><td style="padding: 2px 6px;"><code>--no-listener</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">不监听，只主动出连（纯客户端 / 只出不进）</td><td style="padding: 2px 6px;">未提供</td></tr>
-                                            <tr><td style="padding: 2px 6px;"><code>--console-log-level</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">控制台日志级别 <code>warn</code> / <code>info</code> / <code>debug</code> 等</td><td style="padding: 2px 6px;">未提供</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--hostname</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">本节点显示名，纯透传，留空则用系统名</td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--listeners</code></td><td style="padding: 2px 6px;"><code>-l</code></td><td style="padding: 2px 6px;">监听地址，可重复；<b>不填时缺省 <code>tcp+udp 0.0.0.0:11010</code></b></td><td style="padding: 2px 6px;">可填</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--no-listener</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">不监听，只主动出连（纯客户端 / 只出不进），与 <code>-l</code> 互斥</td><td style="padding: 2px 6px;">开关</td></tr>
+                                            <tr><td style="padding: 2px 6px;"><code>--console-log-level</code></td><td style="padding: 2px 6px;">—</td><td style="padding: 2px 6px;">控制台日志级别，只认 <code>error</code> / <code>warn</code> / <code>info</code> / <code>debug</code> / <code>trace</code></td><td style="padding: 2px 6px;">下拉</td></tr>
                                             <tr><td style="padding: 2px 6px;"><code>--help</code> / <code>--version</code></td><td style="padding: 2px 6px;"><code>-h</code> / <code>-V</code></td><td style="padding: 2px 6px;">在 SSH 里确认当前二进制的版本与可用参数</td><td style="padding: 2px 6px;">—</td></tr>
                                         </table>
                                         <div style="margin-top: 4px; color: #777; font-size: 12px;">
-                                            标“未提供”的四个参数本页没有输入框，需要时改 <code>/tmp/easytier/run.sh</code> 或提需求加字段。
+                                            上表参数本页均已覆盖，填了才会拼进命令行。
                                         </div>
 
                                         <div style="margin-top: 8px;"><b>常用写法</b></div>
@@ -421,7 +473,10 @@ easytier-lite \
                                             <b>虚拟网卡 <code>--tun</code> 默认关</b>：不开就只当中继 / 子网代理（最省内存）；要进虚拟网被别的节点访问才开。
                                             没有虚拟 IP 时即使勾了也不启用，脚本会写一行日志说明。
                                             <br>
-                                            <b>监听口</b>：不填 <code>-l</code> 时默认监听 <code>tcp+udp 0.0.0.0:11010</code>，公网可直连的节点需要保留；只想出连不想被连，用 <code>--no-listener</code>。
+                                            <b>监听口</b>：不填 <code>-l</code> 时默认监听 <code>tcp+udp 0.0.0.0:11010</code>，公网可直连的节点需要保留；只想出连不想被连，勾「不监听 <code>--no-listener</code>」。
+                                            两者<b>互斥</b>：勾了不监听，就算「监听地址」里填了内容也不会下发（日志会写明已忽略）。
+                                            <br>
+                                            <b>主机名 / 日志级别</b>：主机名只是显示名，留空不影响连通；日志级别留空即用程序默认，排查连不上时临时调 <code>debug</code>，平时建议 <code>warn</code> 或 <code>info</code>，因为 <code>trace</code> 会让日志涨得很快。
                                             <br>
                                             实际执行的命令每次“应用”后生成在 <code>/tmp/easytier/run.sh</code>，跑起来后可用 <code>tail -f /tmp/easytier.log</code> 看启动参数与错误。
                                         </div>
