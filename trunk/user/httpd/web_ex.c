@@ -2466,6 +2466,7 @@ easytier_action_hook(int eid, webs_t wp, int argc, char **argv)
 #define MH_MODE			"/tmp/mihomo/.mode"
 /* 订阅后处理脚本: 每次拉完订阅由 mihomo-start 执行, 与精简开关无关 */
 #define MH_SED_FILE		"/etc/storage/mihomo/my_sed.sh"
+#define MH_CFG		"/tmp/mihomo/config.yaml"
 #define MH_SED_MAX		8192
 
 /* 按 /proc/<pid>/comm 找进程 —— 不依赖 pidof 是否在 httpd 的 PATH 里 */
@@ -2947,6 +2948,99 @@ mihomo_log_hook(int eid, webs_t wp, int argc, char **argv)
 
 	mihomo_html_escape(wp, buf + start);
 
+	return 0;
+}
+
+
+/* ------------------------------------------------------------------
+ * 规则查看页 (Advanced_MihomoRules_Content.asp)
+ * 只读: 从当前生效配置 /tmp/mihomo/config.yaml 里抽 rules: 段与统计,
+ * 不碰任何配置。fallback 兜底模式下文件里只有 MATCH 一条, 如实显示。
+ * ------------------------------------------------------------------ */
+#define MH_RULES_MAX_LINES	1000
+
+static void
+mihomo_cfg_stats(int *rules, int *proxies)
+{
+	FILE *fp;
+	char line[512];
+	int in_rules = 0, in_proxies = 0;
+
+	*rules = 0; *proxies = 0;
+	fp = fopen(MH_CFG, "r");
+	if (!fp)
+		return;
+	while (fgets(line, sizeof(line), fp)) {
+		if (line[0] != ' ' && line[0] != '\t' && line[0] != '-') {
+			if (!strncmp(line, "rules:", 6))   { in_rules = 1; in_proxies = 0; continue; }
+			if (!strncmp(line, "proxies:", 8)) { in_proxies = 1; in_rules = 0; continue; }
+			in_rules = 0; in_proxies = 0;
+			continue;
+		}
+		if (in_rules && strstr(line, "- "))
+			(*rules)++;
+		else if (in_proxies && strstr(line, "- "))
+			(*proxies)++;
+	}
+	fclose(fp);
+}
+
+/* <% mihomo_rules_stat(); %>  统计行: 模式 / 规则条数 / 节点数 */
+static int
+mihomo_rules_stat_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	FILE *fp;
+	char mode[24] = "unknown";
+	int r, p;
+
+	fp = fopen(MH_MODE, "r");
+	if (fp) {
+		if (fgets(mode, sizeof(mode), fp))
+			mode[strcspn(mode, "\r\n")] = 0;
+		fclose(fp);
+	}
+	mihomo_cfg_stats(&r, &p);
+	websWrite(wp, "当前模式: <b>%s</b> &nbsp;|&nbsp; 规则: <b>%d</b> 条 &nbsp;|&nbsp; 节点: <b>%d</b> 个",
+		mode, r, p);
+	return 0;
+}
+
+/* <% mihomo_rules_get(); %>  rules: 段全文 (转义, 截断到 1000 行) */
+static int
+mihomo_rules_get_hook(int eid, webs_t wp, int argc, char **argv)
+{
+	FILE *fp;
+	char line[512];
+	int in_rules = 0, shown = 0, total = 0;
+
+	fp = fopen(MH_CFG, "r");
+	if (!fp) {
+		websWrite(wp, "# 未找到当前配置 %s\n# mihomo 未启动过, 或还在使用兜底空配置", MH_CFG);
+		return 0;
+	}
+	while (fgets(line, sizeof(line), fp)) {
+		if (line[0] != ' ' && line[0] != '\t' && line[0] != '-') {
+			if (!strncmp(line, "rules:", 6)) {
+				in_rules = 1;
+				easytier_html_escape(wp, line);
+				continue;
+			}
+			if (in_rules)
+				break;		/* 下一个顶层键, rules 段结束 */
+			continue;
+		}
+		if (!in_rules)
+			continue;
+		total++;
+		if (shown < MH_RULES_MAX_LINES) {
+			easytier_html_escape(wp, line);
+			shown++;
+		}
+	}
+	fclose(fp);
+	if (total > shown)
+		websWrite(wp, "\n# ... 其余 %d 条未显示 (上限 %d 行)\n",
+			total - shown, MH_RULES_MAX_LINES);
 	return 0;
 }
 
@@ -5172,6 +5266,8 @@ struct ej_handler ej_handlers[] =
 	{ "mihomo_sed_get",		mihomo_sed_get_hook},
 	{ "mihomo_log",		mihomo_log_hook},
 	{ "mihomo_action",		mihomo_action_hook},
+{ "mihomo_rules_stat",	mihomo_rules_stat_hook},
+{ "mihomo_rules_get",	mihomo_rules_get_hook},
 	{ NULL, NULL }
 };
 
