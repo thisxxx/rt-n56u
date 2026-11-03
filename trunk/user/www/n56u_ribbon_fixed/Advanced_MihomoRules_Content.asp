@@ -29,10 +29,25 @@ function initial(){
 	show_banner(1);
 	show_menu(5, 8, 6);
 	show_footer();
+	var el = document.getElementById('pginfo');
+	if (el) el.innerHTML = '第 ' + CUR + ' / ' + PAGES + ' 页';
 }
 
 function refresh_rules(){
 	location.reload();
+}
+
+/* 分页: 总页数由 httpd 钩子给出, 页码走 URL ?page=N */
+var PAGES = <% mihomo_rules_pages(); %>;
+var pg_qs = window.location.search.match(/[?&]page=(\d+)/);
+var CUR = pg_qs ? parseInt(pg_qs[1], 10) : 1;
+if (isNaN(CUR) || CUR < 1) CUR = 1;
+if (CUR > PAGES) CUR = PAGES;
+
+function goto_page(p){
+	if (p < 1) p = 1;
+	if (p > PAGES) p = PAGES;
+	location.href = 'Advanced_MihomoRules_Content.asp?page=' + p;
 }
 </script>
 </head>
@@ -79,6 +94,13 @@ function refresh_rules(){
                                         <% mihomo_rules_stat(); %>
                                         &nbsp;|&nbsp; 来源: /tmp/mihomo/config.yaml（当前实际生效的配置）
                                         <button class="btn btn-mini" type="button" style="margin-left: 12px;" onclick="refresh_rules();">刷新</button>
+                                    </div>
+
+                                    <div style="margin: 0 10px 6px 10px;">
+                                        <button class="btn btn-mini" type="button" onclick="goto_page(CUR-1);">&laquo; 上一页</button>
+                                        <span id="pginfo" style="margin: 0 8px; color: #555; font-weight: bold;"></span>
+                                        <button class="btn btn-mini" type="button" onclick="goto_page(CUR+1);">下一页 &raquo;</button>
+                                        <span style="color: #999; margin-left: 8px;">分页只读, 每页 500 条, 大订阅不再截断</span>
                                     </div>
 
                                     <table width="100%" cellpadding="4" cellspacing="0" class="table">
