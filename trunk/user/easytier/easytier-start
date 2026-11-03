@@ -32,6 +32,7 @@ export PATH
 set -f
 
 BIN=/usr/bin/easytier-core
+FW=/usr/bin/easytier-firewall
 NVRAM=/usr/sbin/nvram
 LOG=/tmp/easytier.log
 RUNDIR=/tmp/easytier
@@ -81,6 +82,7 @@ do_stop() {
 	fi
 
 	log "EasyTier 已停止"
+	[ -x "$FW" ] && "$FW" clear
 	return 0
 }
 
@@ -202,6 +204,10 @@ do_start() {
 	fi
 
 	log "EasyTier 已启动 (pid $(pidof easytier-core))"
+
+	# 防火墙: 端口从本次实际生效的 et_listeners 现读, 面板换了监听口, 重启一次就跟随
+	[ -x "$FW" ] && "$FW" apply
+
 	return 0
 }
 
