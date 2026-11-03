@@ -25,6 +25,7 @@ romfs:
 	# -p +x: 显式补上可执行权限
 	$(ROMFSINST) -S -p +x $(THISDIR)/easytier-core /usr/bin/easytier-core
 	$(ROMFSINST) -S -p +x $(THISDIR)/easytier-start /usr/bin/easytier-start
+	$(ROMFSINST) -S -p +x $(THISDIR)/easytier-firewall /usr/bin/easytier-firewall
 
 clean:
 	@true
