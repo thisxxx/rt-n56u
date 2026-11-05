@@ -3107,6 +3107,7 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 {
 	int i, enabled, ok, do_update, sed_rc;
 	const char *sed_flag;
+	const char *split_flag;
 	const char *err = NULL;
 	const char *act;
 	char st[32];
@@ -3123,6 +3124,7 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 
 	/* textarea 里的后处理脚本: 只有点了“保存脚本”才会带上这个标记 */
 	sed_flag = websGetVar(wp, "mh_sed_save", NULL);
+	split_flag = websGetVar(wp, "mh_split_save", NULL);
 
 	/* fake-ip 开关和现行配置不一致 => restart 不够, 升级成一次重建 */
 	if (!do_update && mihomo_dns_mode_changed())
@@ -3150,6 +3152,12 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 		}
 		do_update = 1;
 	}
+
+	/* 内网域名解析 (split DNS): 走 dnsmasq 官方 include (/etc/storage/dnsmasq/dnsmasq.conf),
+	 * 与 mihomo 启用与否无关 —— mihomo 没开也照样解析。只有显式点了"应用域名解析"
+	 * 才执行; 普通"应用"不重复热加载 (mihomo-start restart/autostart 内部会自行同步) */
+	if (split_flag && !strcmp(split_flag, "1"))
+		doSystem("%s splitdns >/dev/null 2>&1", MH_CTL);
 
 	if (enabled && !f_exists(MH_BIN))
 		err = "固件里没有 /usr/bin/mihomo (编译时没开 CONFIG_FIRMWARE_INCLUDE_MIHOMO)";
