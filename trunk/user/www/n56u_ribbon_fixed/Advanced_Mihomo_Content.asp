@@ -123,6 +123,40 @@ function save_sed(){
 	document.form.submit();
 }
 
+/* 内网域名解析 (split DNS): 保存 nvram 并立即写 dnsmasq, 与 mihomo 开关无关 */
+function save_split(){
+	if (!login_safe()){
+		alert('当前不是局域网/HTTPS 安全会话，不允许修改 Mihomo');
+		return;
+	}
+	var t = document.form.mh_split_text;
+	if (t.value.length > 2048){
+		alert('内容太长（' + t.value.length + ' 字节），上限 2048 字节。');
+		return;
+	}
+	var lines = t.value.split('\n'), bad = '', n = 0;
+	for (var i = 0; i < lines.length; i++){
+		var s = lines[i].replace(/#.*/, '').replace(/^\s+|\s+$/g, '');
+		if (s === '') continue;
+		n++;
+		var m = s.split(/\s+/);
+		if (m.length < 2 || !/^[a-zA-Z0-9._-]+$/.test(m[0]) || m[0].indexOf('.') < 0 ||
+		    !/^\d{1,3}(\.\d{1,3}){3}$/.test(m[1]))
+			bad += '第 ' + (i+1) + ' 行: ' + lines[i] + '\n';
+	}
+	if (bad !== ''){
+		alert('以下行格式不对（应为: 域名 内网IP，域名要带点）：\n' + bad + '修正后再保存。');
+		return;
+	}
+	showLoading();
+	document.form.mh_split_save.value = '1';
+	document.form.mh_action.value = 'apply';
+	document.form.action_mode.value = " Apply ";
+	document.form.current_page.value = "Advanced_Mihomo_Content.asp";
+	document.form.next_page.value = "";
+	document.form.submit();
+}
+
 function updateSub(){
 	submit_form('update');
 }
@@ -206,6 +240,7 @@ function open_panel(){
     <input type="hidden" name="action_script" value="">
     <input type="hidden" name="mh_action" value="apply">
     <input type="hidden" name="mh_sed_save" value="0">
+    <input type="hidden" name="mh_split_save" value="0">
 
     <div class="container-fluid">
         <div class="row-fluid">
@@ -372,6 +407,28 @@ function open_panel(){
                                                     <button class="btn btn-mini btn-primary" type="button" onclick="save_sed();">保存脚本并生效</button>
                                                     <span style="margin-left: 8px; color: #999;">
                                                         保存即落盘（重启不丢），有改动会自动重拉一次订阅让改动立刻生效；清空后保存 = 关闭钩子。
+                                                    </span>
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        <tr>
+                                            <th>内网域名解析<br><span style="font-weight: normal; color: #999;">split DNS</span></th>
+                                            <td>
+                                                <div style="color: #999; margin-bottom: 6px;">
+                                                    每行一条 <b>域名 内网IP</b>（空格分隔，# 开头为注释）。
+                                                    内网设备解析这些域名时直接返回内网地址（dnsmasq 层生效，
+                                                    <b>与上面“启用”开关无关，mihomo 没开也照常工作</b>）；
+                                                    外网设备照常走公网 DNS 解析。
+                                                    IP 可以是局域网地址，也可以是 EasyTier 虚拟 IP 或其子网代理网段内的地址。
+                                                </div>
+                                                <textarea name="mh_split_text" id="mh_split_text" rows="6" wrap="off" spellcheck="false"
+                                                          maxlength="2048" placeholder="# 例:&#10;nas.example.com 192.168.2.3&#10;home.example.com 10.126.126.1"
+                                                          style="width: 96%; font-family: 'Courier New', monospace; font-size: 12px;"><% nvram_get_x("","mh_split_text"); %></textarea>
+                                                <div style="margin-top: 6px;">
+                                                    <button class="btn btn-mini btn-primary" type="button" onclick="save_split();">应用域名解析</button>
+                                                    <span style="margin-left: 8px; color: #999;">
+                                                        保存后立即写入 dnsmasq 并热加载，重启不丢；清空后保存 = 关闭该功能。
                                                     </span>
                                                 </div>
                                             </td>
