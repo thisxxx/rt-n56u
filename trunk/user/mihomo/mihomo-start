@@ -10,6 +10,8 @@
 #   mihomo-start stop       停止进程并清理 iptables 规则
 #   mihomo-start et-start   只启动 EasyTier (二进制和配置都在才生效)
 #   mihomo-start et-stop    只停止 EasyTier
+#   mihomo-start splitdns   应用内网域名解析 (面板"内网域名解析"文本框 -> dnsmasq;
+#                           与 mihomo 启用开关无关, mihomo 没开也生效)
 #   mihomo-start fakeip     DNS 模式开关: on|off|status (存 nvram, 重启不丢)
 #                           on=客户端解析到 198.18.x.x 假 IP, 域名规则 100% 精准;
 #                           off=redir-host 真实 IP (默认); 切换会重建配置并重启
@@ -124,6 +126,12 @@ dns_mode() {
 # fake-ip 模式下不让这些域名拿到假 IP (内网发现/NTP/IOT 会对假 IP 敏感)
 # 两处引用: 订阅无 dns 段时的 flow 行插入 + 块格式 dns 段的补插
 FAKEIP_FILTER="*.lan', '*.local', '+.local', 'time.windows.com', 'time.apple.com', 'time.gstatic.com', '+.pool.ntp.org', '+.ntp.org', '+.market.xiaomi.com"
+# split DNS: 面板 mh_split_text 每行 "域名 内网IP"。写入 dnsmasq 官方 include
+# /etc/storage/dnsmasq/dnsmasq.conf (rc 生成主配置时无条件 conf-file 指向它),
+# mihomo 开不开都生效; fake-ip 模式下这些域名自动进 fake-ip-filter 保证拿到真 IP
+SPLIT_CONF=/etc/storage/dnsmasq/dnsmasq.conf
+SPLIT_B='# --- mihomo split-dns begin (auto) ---'
+SPLIT_E='# --- mihomo split-dns end (auto) ---'
 
 # 统计 rules 段里的规则条数
 count_rules() {
@@ -136,6 +144,50 @@ count_rules() {
 }
 
 # 精简参数取值: nvram (面板上改的) > 调用方给的默认值
+# ============ 内网域名解析 (split DNS, 独立于 mihomo) ============
+# 只收合法域名 + IPv4, 坏行静默跳过 (面板 JS 有前置校验, 这里是最后一道防线)
+split_entries() {
+	nvram get mh_split_text 2>/dev/null | tr -d '\r' | awk '
+	{
+		sub(/#.*/, "")
+		gsub(/^[ \t]+|[ \t]+$/, "")
+		if ($0 == "") next
+		d = tolower($1); ip = $2
+		if (d !~ /^[a-z0-9_.-]+$/ || index(d, ".") == 0) next
+		if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
+		n = split(ip, o, ".")
+		if (n != 4) next
+		bad = 0
+		for (i = 1; i <= 4; i++) if (o[i] + 0 > 255) bad = 1
+		if (bad) next
+		print "address=/" d "/" ip
+	}'
+}
+
+# 更新 SPLIT_CONF 中的标记块 (文件其余内容原样保留), 有变化才热加载 dnsmasq。
+# 文本为空 = 清掉标记块 = 关闭该功能。写完顺带落盘 storage (mtd) 持久化。
+apply_split_dns() {
+	n=0
+	mkdir -p /etc/storage/dnsmasq 2>/dev/null
+	split_entries > "$RUNDIR/.split.ent"
+	n=$(grep -c . "$RUNDIR/.split.ent" 2>/dev/null); [ -z "$n" ] && n=0
+	: > "$RUNDIR/.split.block"
+	if [ "$n" -gt 0 ]; then
+		{ echo "$SPLIT_B"; cat "$RUNDIR/.split.ent"; echo "$SPLIT_E"; } > "$RUNDIR/.split.block"
+	fi
+	awk -v b="$SPLIT_B" -v e="$SPLIT_E" '
+		$0 == b { skip = 1; next } $0 == e { skip = 0; next } !skip' \
+		"$SPLIT_CONF" > "$RUNDIR/.split.base" 2>/dev/null || : > "$RUNDIR/.split.base"
+	cat "$RUNDIR/.split.base" "$RUNDIR/.split.block" > "$RUNDIR/.split.new"
+	if [ ! -f "$SPLIT_CONF" ] || ! cmp -s "$RUNDIR/.split.new" "$SPLIT_CONF"; then
+		cat "$RUNDIR/.split.new" > "$SPLIT_CONF"
+		mtd_storage.sh save >/dev/null 2>&1 &
+		killall -SIGHUP dnsmasq 2>/dev/null || service restart_dnsmasq >/dev/null 2>&1
+		log "split DNS: dnsmasq 已更新 ($n 条内网域名解析)"
+	fi
+	rm -f "$RUNDIR/.split.ent" "$RUNDIR/.split.base" "$RUNDIR/.split.new" "$RUNDIR/.split.block"
+}
+
 slim_nv() {
 	_x=$(nvram get "$1" 2>/dev/null)
 	[ -n "$_x" ] && printf '%s' "$_x" || printf '%s' "$2"
@@ -487,15 +539,24 @@ do_fetch() {
 	grep -q "^tproxy-port:" "$CFG_NEW" || sed -i "1i tproxy-port: $TPROXY_PORT" "$CFG_NEW"
 	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向; 模式由 mh_fakeip 开关决定
 	DNS_MODE=$(dns_mode)
+	# 用户私人域名进 fake-ip-filter: fake-ip 模式下必须回真内网 IP 而不是 198.18.x.x
+	SPLIT_FILTER=$(split_entries | cut -d/ -f2 | sed -e "s/.*/, '/" -e "s/$/'/" | tr -d '\n')
 	if grep -q "^dns:" "$CFG_NEW"; then
 		# 订阅自带 dns 段 (块格式): 行内替换 enhanced-mode, fake-ip 时补 filter
 		sed -i "s/enhanced-mode:[ \t]*[a-zA-Z-]*/enhanced-mode: $DNS_MODE/" "$CFG_NEW"
-		if [ "$DNS_MODE" = "fake-ip" ] && ! grep -q "fake-ip-filter:" "$CFG_NEW"; then
-			sed -i "/^dns:/a\\  fake-ip-filter: ['$FAKEIP_FILTER']" "$CFG_NEW"
+		if [ "$DNS_MODE" = "fake-ip" ]; then
+			if grep -q "fake-ip-filter:" "$CFG_NEW"; then
+				# 订阅自带 filter (单行数组式): 把用户域名追加进同一行
+				if [ -n "$SPLIT_FILTER" ]; then
+					sed -i "s/fake-ip-filter: \[\(.*\)\]/fake-ip-filter: [\1$SPLIT_FILTER]/" "$CFG_NEW"
+				fi
+			else
+				sed -i "/^dns:/a\\  fake-ip-filter: ['$FAKEIP_FILTER$SPLIT_FILTER']" "$CFG_NEW"
+			fi
 		fi
 	else
 		# 订阅没有 dns 段: 顶部插入单行 flow 配置 (fake-ip-filter 在 redir-host 下被忽略, 无害)
-		sed -i "1i dns: { enable: true, listen: 0.0.0.0:$DNS_PORT, enhanced-mode: $DNS_MODE, fake-ip-range: 198.18.0.1/16, fake-ip-filter: ['$FAKEIP_FILTER'] }" "$CFG_NEW"
+		sed -i "1i dns: { enable: true, listen: 0.0.0.0:$DNS_PORT, enhanced-mode: $DNS_MODE, fake-ip-range: 198.18.0.1/16, fake-ip-filter: ['$FAKEIP_FILTER$SPLIT_FILTER'] }" "$CFG_NEW"
 	fi
 	# geo 自动更新会定期拉全量库(8+4 MiB), 128MB 机器扛不住, 统一关掉
 	grep -q "^geo-auto-update:" "$CFG_NEW" || sed -i "1i geo-auto-update: false" "$CFG_NEW"
@@ -715,10 +776,13 @@ retry_daemon() {
 
 case "$1" in
 	update) run_update ;;
-	restart) do_stop; sleep 1; do_start ;;
+	splitdns) apply_split_dns ;;
+	restart) apply_split_dns; do_stop; sleep 1; do_start ;;
 	stop)    do_stop ;;
 	autostart)
-		# 开机钩子调用: 只有 mh_autostart=1 才起
+		# 开机钩子调用: 先同步一次 split DNS (幂等, mihomo 关着也要生效),
+		# 再看 mh_autostart 决定要不要起 mihomo
+		apply_split_dns
 		[ "$(nvram get mh_autostart 2>/dev/null)" = "1" ] || exit 0
 		pidof mihomo >/dev/null 2>&1 && exit 0
 		# rc 在 system ready 后调用, 但 WAN 拿到地址可能还差几秒;
@@ -804,5 +868,5 @@ case "$1" in
 		esac
 		;;
 	start|"") do_start ;;
-	*) echo "用法: mihomo-start [start|update|restart|stop|status|autostart|et-start|et-stop|slim on|off|status]"; exit 1 ;;
+	*) echo "用法: mihomo-start [start|update|restart|stop|status|autostart|splitdns|fakeip on|off|status|slim on|off|status]"; exit 1 ;;
 esac
