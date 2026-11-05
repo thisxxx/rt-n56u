@@ -32,7 +32,14 @@ env:
   EASYTIER_SIZE: 0
   EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.8-20261103-8708296/easytier-lite-linux-mipsel.zip
   # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
-  SQUASHFS_BLOCK: 524288
+  # R4A 只有 14.50 MiB 分区, 且要塞 mihomo(30.8MB) + easytier(7.8MB) + yacd + geo,
+  # 512K 块装不下(实测超限 32,638 B)。提到 1M: mihomo 省 198,976 B, easytier 省 73,668 B,
+  # 内核 3.4.x 的 SQUASHFS_FILE_MAX_SIZE 就是 1048576, 1M 块是允许的上限。
+  # 注意: 这个 sed 只作用于本次 CI 的 /opt 副本, 仓库里 MT7621 Makefile 仍保持 512K(K2P 用)。
+  SQUASHFS_BLOCK: 1048576
+  GEO_BASE: https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest
+  GEOIP_SIZE: 0
+  GEOSITE_SIZE: 0
 
 jobs:
   build:
@@ -118,6 +125,33 @@ jobs:
           strings "$T/user/easytier/easytier-core" 2>/dev/null | grep -qi 'dhcp' \
             && echo "dhcp 相关符号存在" || echo "::warning::未见 dhcp 字符串, 请确认 0.2.8 包是否正确"
 
+      - name: 准备 geo 数据（精简版）与 squashfs 块大小
+        run: |
+          set -euo pipefail
+          T=/opt/rt-n56u/trunk
+
+          # R4A 之前缺这一步: mihomo 模块 Makefile 无条件安装 geoip.metadb/geosite.dat,
+          # 文件不在时 romfs 步骤报 "cp: cannot stat" 但仍继续打包 —— 结果固件里没有 geo,
+          # 运行时 mihomo 一碰到 GEOIP 规则就去 GitHub 拉 8MB 全量库, 128MB 机器扛不住。
+          curl -fL --retry 3 --retry-delay 5 -o "$T/user/mihomo/geoip.metadb" "$GEO_BASE/geoip-lite.metadb"
+          curl -fL --retry 3 --retry-delay 5 -o "$T/user/mihomo/geosite.dat"  "$GEO_BASE/geosite-lite.dat"
+          GIP=$(stat -c%s "$T/user/mihomo/geoip.metadb")
+          GST=$(stat -c%s "$T/user/mihomo/geosite.dat")
+          echo "GEOIP_SIZE=$GIP"   >> "$GITHUB_ENV"
+          echo "GEOSITE_SIZE=$GST" >> "$GITHUB_ENV"
+          echo "geoip.metadb: $GIP 字节, geosite.dat: $GST 字节"
+          [ "$GIP" -gt 100000 ] && [ "$GST" -gt 50000 ] || { echo "::error::geo 数据体积异常, 疑似下载到错误页"; exit 1; }
+
+          # 块大小 512K -> 1M (只改本次 CI 的副本, 仓库里保持 512K 给 K2P)
+          # 注意 Makefile 注释里也写着 "-b 524288", 只对 mksquashfs 那一行做替换
+          VENDOR=$T/vendors/Ralink/MT7621/Makefile
+          N=$(grep -c 'mksquashfs .*-b 524288' "$VENDOR" || true)
+          echo "mksquashfs 行含 -b 524288 的数量: $N"
+          [ "$N" = "1" ] || { echo "::error::mksquashfs 行匹配数不是 1, 拒绝改写"; exit 1; }
+          sed -i '/mksquashfs/ s/-b 524288/-b 1048576/' "$VENDOR"
+          grep -q 'mksquashfs .*-b 1048576' "$VENDOR" || { echo "::error::块大小改写失败"; exit 1; }
+          echo "squashfs 块大小已提升到 1048576"
+
       - name: 编译前校验（二进制 / 配置 / 模块注册）
         run: |
           set -e
@@ -181,9 +215,9 @@ jobs:
           echo "easytier 静态链接检查通过"
 
           # ---- squashfs 块大小校验 (体积达标的关键) ----
-          grep -q 'mksquashfs .*-b 524288' \
+          grep -q 'mksquashfs .*-b 1048576' \
                /opt/rt-n56u/trunk/vendors/Ralink/MT7621/Makefile \
-               || { echo "::error::MT7621.mak 未设置 mksquashfs -b 524288, 固件会超限"; exit 1; }
+               || { echo "::error::MT7621.mak 未设置 mksquashfs -b 1048576, 固件会超限"; exit 1; }
           echo "squashfs 块大小: $SQUASHFS_BLOCK 字节"
           echo "编译前校验全部通过"
 
@@ -211,6 +245,13 @@ jobs:
           [ "$ROMFS_ET" -eq "$EASYTIER_SIZE" ] || {
             echo "::error::romfs 里的 easytier-core 大小异常: $ROMFS_ET (期望 $EASYTIER_SIZE)"; exit 1; }
           test -x romfs/usr/bin/easytier-core || { echo "::error::romfs 内 easytier-core 不可执行"; exit 1; }
+
+          # geo 数据必须真的进 romfs: 之前缺文件时 romfs 步骤报 "cp: cannot stat" 但打包继续,
+          # geo 静默丢失, 固件能刷能跑, 直到遇到 GEOIP 规则才发现要联网拉全量库
+          for g in geoip.metadb geosite.dat; do
+            test -s "romfs/usr/share/mihomo/$g" || { echo "::error::romfs 内缺 geo 数据: $g"; exit 1; }
+          done
+          echo "romfs 内 geo: $(stat -c%s romfs/usr/share/mihomo/geoip.metadb) + $(stat -c%s romfs/usr/share/mihomo/geosite.dat) 字节"
 
           echo "===== squashfs 侧 ====="
           ROOTFS=$(stat -c%s images/ramdisk)
@@ -279,6 +320,7 @@ jobs:
             echo "| rootfs (squashfs, -b $SQUASHFS_BLOCK) | $ROOTFS | $(awk "BEGIN{printf \"%.2f\", $ROOTFS/1048576}") |"
             echo "| mihomo 占用 | ${MH_SQ:-0} | $(awk "BEGIN{printf \"%.2f\", ${MH_SQ:-0}/1048576}") |"
             echo "| easytier-core 占用 | ${ET_SQ:-0} | $(awk "BEGIN{printf \"%.2f\", ${ET_SQ:-0}/1048576}") |"
+            echo "| geo 数据 (geoip+geosite) | $((GEOIP_SIZE + GEOSITE_SIZE)) | $(awk "BEGIN{printf \"%.2f\", ($GEOIP_SIZE+$GEOSITE_SIZE)/1048576}") |"
             echo "| trx 合计 | $SIZE | $(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}") |"
             echo "| 分区上限 | $MAX_TRX_SIZE | 14.50 |"
             echo "| 剩余余量 | $MARGIN | $(awk "BEGIN{printf \"%.2f\", $MARGIN/1048576}") |"
@@ -305,9 +347,11 @@ jobs:
           name: MI-R4A mihomo 固件 build ${{ github.run_number }}
           body: |
             小米 R4A 千兆版 (MI-R4A) 固件，内置 **未压缩** 的 mihomo 与 easytier-lite
-            (mipsle softfloat 全静态二进制；mihomo 30,802,086 字节、easytier-core 6,698,364 字节)。
+            (mipsle softfloat 全静态二进制，版本与大小见构建日志)，并预置精简 geo 数据。
 
-            - squashfs 块大小提高到 512KiB，Go 静态二进制压缩率明显改善
+            - squashfs 块大小提高到 1MiB（内核 SQUASHFS_FILE_MAX_SIZE 上限），Go 静态二进制压缩率明显改善
+            - easytier 升到 v0.2.8，含 dhcp-ipv4 feature
+            - 补齐 geoip.metadb / geosite.dat，GEOIP 规则离线可用
             - 源码 commit: ${{ github.sha }}
             - mihomo 部署：刷入后在「系统管理 → 服务 → 启动脚本」加一行 `/usr/bin/mihomo-start &`，
               再把订阅地址写进 `/etc/storage/mihomo/sub_url.txt`
