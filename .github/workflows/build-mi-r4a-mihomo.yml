@@ -27,8 +27,10 @@ env:
   MAX_TRX_SIZE: 15204352
   # 未压缩 mihomo 的精确字节数
   MIHOMO_SIZE: 30802086
-  # 未压缩 easytier-lite 的精确字节数 (lite-v0.2.0-20261031-e89ca8a, upx -d 解压后)
-  EASYTIER_SIZE: 6698364
+  # easytier: 与 K2P 保持一致, CI 内现拉 lite v0.2.8 (含 dhcp-ipv4 feature)
+  # 大小由准备步骤按实际解包结果动态写入 GITHUB_ENV, 不再手工维护
+  EASYTIER_SIZE: 0
+  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.8-20261103-8708296/easytier-lite-linux-mipsel.zip
   # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
   SQUASHFS_BLOCK: 524288
 
@@ -83,6 +85,38 @@ jobs:
           if [ -d /usr/share/terminfo ] && [ ! -e /etc/terminfo/x ]; then
             sudo ln -sf /usr/share/terminfo/x /etc/terminfo/x || true
           fi
+
+      - name: 准备 easytier 二进制（CI 内拉 v0.2.8 lite）
+        run: |
+          set -euo pipefail
+          T=/opt/rt-n56u/trunk
+
+          # 仓库里那份是 v0.2.0 (无 dhcp-ipv4), 这里换成 v0.2.8 并与 K2P 保持一致
+          rm -rf /tmp/et && mkdir -p /tmp/et
+          curl -fL --retry 3 --retry-delay 5 -o /tmp/et.zip "$EASYTIER_URL"
+          unzip -q -o /tmp/et.zip -d /tmp/et
+          ET=$(find /tmp/et -type f \( -name 'easytier-lite*' -o -name 'easytier-core*' \) | head -1)
+          [ -n "$ET" ] || { echo "::error::压缩包里找不到 easytier 二进制"; unzip -l /tmp/et.zip; exit 1; }
+          echo "包内取到: $ET ($(stat -c%s "$ET") 字节)"
+
+          # release 发布的是 UPX(lzma) 包: 运行时整体解压进匿名内存, 128MB 机器会 OOM, 必须先解开
+          if head -c 512 "$ET" | grep -aq 'UPX!'; then
+            echo "检测到 UPX 壳, 解包..."
+            curl -fsSL --retry 3 -o /tmp/upx.tar.xz \
+              "https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz"
+            tar -xJf /tmp/upx.tar.xz -C /tmp
+            /tmp/upx-4.2.4-amd64_linux/upx -d -o /tmp/easytier.raw "$ET" >/dev/null
+            ET=/tmp/easytier.raw
+          fi
+
+          install -m 0755 "$ET" "$T/user/easytier/easytier-core"
+          EASYSZ=$(stat -c%s "$T/user/easytier/easytier-core")
+          echo "EASYTIER_SIZE=$EASYSZ" >> "$GITHUB_ENV"
+          echo "ET_SHA256=$(sha256sum "$T/user/easytier/easytier-core" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "easytier-core: $EASYSZ 字节 ($(awk "BEGIN{printf \"%.3f\", $EASYSZ/1048576}") MiB)"
+          # dhcp-ipv4 feature 自检: 二进制里应存在相关字符串
+          strings "$T/user/easytier/easytier-core" 2>/dev/null | grep -qi 'dhcp' \
+            && echo "dhcp 相关符号存在" || echo "::warning::未见 dhcp 字符串, 请确认 0.2.8 包是否正确"
 
       - name: 编译前校验（二进制 / 配置 / 模块注册）
         run: |
