@@ -986,6 +986,9 @@
 			{"mh_action", "", NULL, EVM_BLOCK_UNSAFE},
 			/* 订阅精简的用户自定义 sed 程序 (多行); 非空时整段替代内置精简 */
 			{"mh_slim_text", "", NULL, EVM_BLOCK_UNSAFE},
+			/* 内网域名解析 (split DNS): 每行 "域名 内网IP"; 由 mihomo-start splitdns
+			 * 写进 dnsmasq 官方 include (/etc/storage/dnsmasq/dnsmasq.conf) */
+			{"mh_split_text", "", NULL, EVM_BLOCK_UNSAFE},
 			{0,0,0,0}
 		};
 
