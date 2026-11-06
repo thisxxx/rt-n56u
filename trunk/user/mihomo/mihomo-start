@@ -129,6 +129,7 @@ FAKEIP_FILTER="*.lan', '*.local', '+.local', 'time.windows.com', 'time.apple.com
 # split DNS: 面板 mh_split_text 每行 "域名 内网IP"。写入 dnsmasq 官方 include
 # /etc/storage/dnsmasq/dnsmasq.conf (rc 生成主配置时无条件 conf-file 指向它),
 # mihomo 开不开都生效; fake-ip 模式下这些域名自动进 fake-ip-filter 保证拿到真 IP
+# (裸域 + '+.域' 两条, 子域在 mihomo 层同样拿到真 IP, 与 dnsmasq 后缀匹配对齐)
 SPLIT_CONF=/etc/storage/dnsmasq/dnsmasq.conf
 SPLIT_B='# --- mihomo split-dns begin (auto) ---'
 SPLIT_E='# --- mihomo split-dns end (auto) ---'
@@ -540,7 +541,9 @@ do_fetch() {
 	# DNS: mihomo 监听 8053, 供 dnsmasq 转发 / DNS 劫持指向; 模式由 mh_fakeip 开关决定
 	DNS_MODE=$(dns_mode)
 	# 用户私人域名进 fake-ip-filter: fake-ip 模式下必须回真内网 IP 而不是 198.18.x.x
-	SPLIT_FILTER=$(split_entries | cut -d/ -f2 | sed -e "s/.*/, '/" -e "s/$/'/" | tr -d '\n')
+	# 每个域名注入两条: 裸域 + '+.域' (mihomo 语法, 覆盖全部子域),
+	# 与 dnsmasq 的域后缀匹配行为对齐 —— 否则 fake-ip 模式下子域仍会拿假 IP
+	SPLIT_FILTER=$(split_entries | cut -d/ -f2 | awk '{q=sprintf("%c",39); printf ", %s%s%s, %s+.%s%s", q,$1,q,q,$1,q}' | tr -d '\n')
 	if grep -q "^dns:" "$CFG_NEW"; then
 		# 订阅自带 dns 段 (块格式): 行内替换 enhanced-mode, fake-ip 时补 filter
 		sed -i "s/enhanced-mode:[ \t]*[a-zA-Z-]*/enhanced-mode: $DNS_MODE/" "$CFG_NEW"
