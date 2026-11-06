@@ -2261,8 +2261,9 @@ easytier_write_runner(void)
 	fprintf(fp,
 		"#!/bin/sh\n"
 		"# 本文件由 Web 界面自动生成, 仅供查看 / 手动执行\n"
-		"# 实际启动由 /usr/bin/easytier-start 直接读 nvram, 不依赖本文件\n\n"
-		"easytier-lite");
+		"# 实际启动由 /usr/bin/easytier-start 直接读 nvram, 不依赖本文件\n"
+		"# --tun 是否可用由 easytier-start 现场探测(lite 版默认关), 本文件不做探测\n\n"
+		"/usr/bin/easytier-core");
 
 	easytier_sh_arg(fp, "--network-name", nvram_safe_get("et_network_name"));
 	easytier_sh_arg(fp, "--network-secret", nvram_safe_get("et_network_secret"));
