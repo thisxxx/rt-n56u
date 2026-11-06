@@ -8,8 +8,6 @@
 #   mihomo-start update     重新拉取订阅 -> 应用 sed 补丁 -> 校验 -> 重启
 #   mihomo-start restart    重启进程 (不重新下载)
 #   mihomo-start stop       停止进程并清理 iptables 规则
-#   mihomo-start et-start   只启动 EasyTier (二进制和配置都在才生效)
-#   mihomo-start et-stop    只停止 EasyTier
 #   mihomo-start splitdns   应用内网域名解析 (面板"内网域名解析"文本框 -> dnsmasq;
 #                           与 mihomo 启用开关无关, mihomo 没开也生效)
 #   mihomo-start fakeip     DNS 模式开关: on|off|status (存 nvram, 重启不丢)
@@ -71,9 +69,8 @@
 #
 # ============ EasyTier (可选) ============
 #
-#   /usr/bin/easytier-core                 由 CONFIG_FIRMWARE_INCLUDE_EASYTIER 编入
-#   /etc/storage/easytier/config.toml      EasyTier 的 -c 配置文件
-# 两者都在时, mihomo-start 会顺带拉起它。日志: /tmp/easytier.log
+# EasyTier 由独立的 /usr/bin/easytier-start 管理 (面板: EasyTier 页),
+# 本脚本不拉起、不停止它 —— 历史上曾顺带拉起, 已摘除避免双重管理。
 # 本脚本的 iptables 规则只挂 PREROUTING、不碰 OUTPUT,
 # 所以 EasyTier 这种本机进程的出站流量天然不受影响。
 #
