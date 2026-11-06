@@ -417,6 +417,8 @@ function open_panel(){
                                             <td>
                                                 <div style="color: #999; margin-bottom: 6px;">
                                                     每行一条 <b>域名 内网IP</b>（空格分隔，# 开头为注释）。
+                                                    填根域即通配：<code>example.com</code> 会连同全部子域一起解析到内网地址；
+                                                    不要填 <code>*.example.com</code>（直接填裸根域）。
                                                     内网设备解析这些域名时直接返回内网地址（dnsmasq 层生效，
                                                     <b>与上面“启用”开关无关，mihomo 没开也照常工作</b>）；
                                                     外网设备照常走公网 DNS 解析。
