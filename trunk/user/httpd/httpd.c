@@ -344,6 +344,41 @@ is_safe_ifname(const char *ifname)
 	return 0;
 }
 
+/*
+ * 私网来源判定 (VPN / EasyTier / Tailscale 等)
+ *
+ * 背景: login_safe 原本只认"客户端 IP 与某个本机接口处于同一网段"。
+ * EasyTier 的 tun 是点对点接口, 掩码常常是 /32, 于是:
+ *   - 面板能打开 (读操作不受限)
+ *   - 保存类动作全被拦 ("当前不是局域网/HTTPS 安全会话")
+ *   - initial() 还会把"应用"按钮 disabled 掉, 表现为按不动
+ * 这类客户端与 LAN 客户端安全等级相同 (公网无法伪造私网源地址完成 TCP
+ * 三次握手), 因此把 RFC1918 / CGNAT / 链路本地一并视为安全来源。
+ */
+static int
+is_private_ipaddr(const uaddr *ip)
+{
+	unsigned long a;
+
+	if (ip->family != AF_INET)
+		return 0;
+
+	a = (unsigned long) ntohl(ip->addr.in4.s_addr);
+
+	if ((a & 0xff000000UL) == 0x0a000000UL)		/* 10.0.0.0/8    */
+		return 1;
+	if ((a & 0xfff00000UL) == 0xac100000UL)		/* 172.16.0.0/12 */
+		return 1;
+	if ((a & 0xffff0000UL) == 0xc0a80000UL)		/* 192.168.0.0/16 */
+		return 1;
+	if ((a & 0xffc00000UL) == 0x64400000UL)		/* 100.64.0.0/10 (CGNAT) */
+		return 1;
+	if ((a & 0xffff0000UL) == 0xa9fe0000UL)		/* 169.254.0.0/16 */
+		return 1;
+
+	return 0;
+}
+
 static int
 is_safe_ipaddr(const uaddr *ip)
 {
@@ -459,7 +494,7 @@ http_login(const uaddr *ip_now)
 		login_mac[0] = 0;
 
 	if (!get_ap_mode())
-		login_safe = is_safe_ipaddr(ip_now);
+		login_safe = is_safe_ipaddr(ip_now) || is_private_ipaddr(ip_now);
 	else
 		login_safe = 1;
 
