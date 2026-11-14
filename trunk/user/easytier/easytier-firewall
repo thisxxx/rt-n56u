@@ -13,6 +13,7 @@
 #   EASYTIER_IN    挂到 INPUT     (协议端口 + 本机 tun 入站)
 #   EASYTIER_FWD   挂到 FORWARD   (tun0 与 lan/wan 双向放行)
 #   nat POSTROUTING 的单条 MASQUERADE (出口伪装)
+#   nat INPUT 的单条 SNAT (面板会话伪装, 见 add_web_snat)
 #
 #   apply 每次都先 flush 自己的链再重建, 因此:
 #     * 幂等 —— 重复执行结果一致, WAN 重连后重放不会堆出重复规则
@@ -97,6 +98,54 @@ detect_wan() {
 	echo "$w"
 }
 
+# 面板端口: 跟 httpd 实际监听保持一致 (默认 80)
+WEBPORT=$(get http_lanport)
+[ -n "$WEBPORT" ] || WEBPORT=80
+
+# ---------------------------------------------------------------------------
+# 面板会话伪装
+#
+#   httpd 的 is_safe_ifname() 只认 br0 / OpenVPN 的 tun / ppp10+,
+#   EasyTier 的 tun0 不在白名单里, 于是 is_safe_ipaddr() 恒为 0,
+#   get_login_safe() 跟着为 0, 从虚拟 IP 打开面板时会:
+#     * 各页面 initial() 把"应用"按钮 disabled —— 点了没反应
+#     * validForm() 弹"当前不是局域网/HTTPS 安全会话"
+#     * web_ex.c 的 mihomo_action / easytier_action 钩子在后端直接拒绝
+#     * 改密码 / 脚本 / 证书这类 EVM_BLOCK_UNSAFE 变量被静默跳过
+#
+#   这里把 tun0 入站到面板端口的连接源地址改写成 LAN IP, 让它落在 br0
+#   网段内, httpd 就按局域网会话放行。conntrack 会做回程还原, 对客户端
+#   完全透明; 只匹配 tun0 + 面板端口, 不碰 SSH / 协议端口 / 转发流量。
+#
+#   注意: 这是绕行方案。httpd 打上 is_private_ipaddr 补丁后本规则可留可去,
+#   留着也不影响, 只是访问日志里的来源统一变成 LAN IP。
+# ---------------------------------------------------------------------------
+clear_web_snat() {
+	iptables -t nat -S INPUT 2>/dev/null | grep -F -- "--dport $WEBPORT -j SNAT" 2>/dev/null | \
+	while read -r line; do
+		set -- $line
+		[ "$1" = "-A" ] || continue
+		shift 2
+		iptables -t nat -D INPUT "$@" 2>/dev/null
+	done
+	return 0
+}
+
+add_web_snat() {
+	local lanip
+	lanip=$(get lan_ipaddr)
+	[ -n "$lanip" ] || return 0
+	case "$lanip" in
+		0.0.0.0|"") return 0 ;;
+	esac
+	if iptables -t nat -A INPUT -i "$TUN" -p tcp --dport "$WEBPORT" -j SNAT --to-source "$lanip" 2>/dev/null; then
+		log "面板会话伪装: $TUN:$WEBPORT -> $lanip"
+	else
+		log "面板会话伪装: 内核不支持 nat/INPUT 的 SNAT, 已跳过 (不影响联网)"
+	fi
+	return 0
+}
+
 ensure_chain() {
 	# $1 = 挂载点链 (INPUT/FORWARD), $2 = 自有链
 	iptables -n -L "$2" >/dev/null 2>&1 || iptables -N "$2" || return 1
@@ -112,6 +161,7 @@ clear_rules() {
 	iptables -X "$CHAIN_IN"  2>/dev/null
 	iptables -X "$CHAIN_FWD" 2>/dev/null
 	iptables -t nat -D POSTROUTING -o "$(detect_wan)" -j MASQUERADE 2>/dev/null
+	clear_web_snat
 	return 0
 }
 
@@ -148,6 +198,8 @@ apply_rules() {
 	# --- 出口伪装: 虚拟网段从这里出公网需要 SNAT ---
 	iptables -t nat -C POSTROUTING -o "$wan" -j MASQUERADE 2>/dev/null || \
 		iptables -t nat -A POSTROUTING -o "$wan" -j MASQUERADE
+
+	add_web_snat
 
 	log "规则已下发: tun=$TUN wan=$wan 端口=[${ports# }]"
 	return 0
