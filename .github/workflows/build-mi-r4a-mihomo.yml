@@ -27,10 +27,10 @@ env:
   MAX_TRX_SIZE: 15204352
   # 未压缩 mihomo 的精确字节数
   MIHOMO_SIZE: 30802086
-  # easytier: 与 K2P 保持一致, CI 内现拉 lite v0.2.8 (含 dhcp-ipv4 feature)
+  # easytier: 与 K2P 保持一致, CI 内现拉 lite v0.2.9 (含 dhcp-ipv4 feature)
   # 大小由准备步骤按实际解包结果动态写入 GITHUB_ENV, 不再手工维护
   EASYTIER_SIZE: 0
-  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.8-20261103-8708296/easytier-lite-linux-mipsel.zip
+  EASYTIER_URL: https://github.com/thisxxx/EasyTier/releases/download/lite-v0.2.9-20261114-30249fa/easytier-lite-linux-mipsel.zip
   # squashfs 块大小 (trunk/vendors/Ralink/MT7621/Makefile 里 mksquashfs -b)
   # R4A 只有 14.50 MiB 分区, 且要塞 mihomo(30.8MB) + easytier(7.8MB) + yacd + geo,
   # 512K 块装不下(实测超限 32,638 B)。提到 1M: mihomo 省 198,976 B, easytier 省 73,668 B,
@@ -93,12 +93,12 @@ jobs:
             sudo ln -sf /usr/share/terminfo/x /etc/terminfo/x || true
           fi
 
-      - name: 准备 easytier 二进制（CI 内拉 v0.2.8 lite）
+      - name: 准备 easytier 二进制（CI 内拉 v0.2.9 lite）
         run: |
           set -euo pipefail
           T=/opt/rt-n56u/trunk
 
-          # 仓库里那份是 v0.2.0 (无 dhcp-ipv4), 这里换成 v0.2.8 并与 K2P 保持一致
+          # 仓库里那份是 v0.2.0 (无 dhcp-ipv4), 这里换成 v0.2.9 并与 K2P 保持一致
           rm -rf /tmp/et && mkdir -p /tmp/et
           curl -fL --retry 3 --retry-delay 5 -o /tmp/et.zip "$EASYTIER_URL"
           unzip -q -o /tmp/et.zip -d /tmp/et
@@ -123,7 +123,7 @@ jobs:
           echo "easytier-core: $EASYSZ 字节 ($(awk "BEGIN{printf \"%.3f\", $EASYSZ/1048576}") MiB)"
           # dhcp-ipv4 feature 自检: 二进制里应存在相关字符串
           strings "$T/user/easytier/easytier-core" 2>/dev/null | grep -qi 'dhcp' \
-            && echo "dhcp 相关符号存在" || echo "::warning::未见 dhcp 字符串, 请确认 0.2.8 包是否正确"
+            && echo "dhcp 相关符号存在" || echo "::warning::未见 dhcp 字符串, 请确认 0.2.9 包是否正确"
 
       - name: 准备 geo 数据（精简版）与 squashfs 块大小
         run: |
@@ -350,7 +350,7 @@ jobs:
             (mipsle softfloat 全静态二进制，版本与大小见构建日志)，并预置精简 geo 数据。
 
             - squashfs 块大小提高到 1MiB（内核 SQUASHFS_FILE_MAX_SIZE 上限），Go 静态二进制压缩率明显改善
-            - easytier 升到 v0.2.8，含 dhcp-ipv4 feature
+            - easytier 升到 v0.2.9，含 dhcp-ipv4 feature
             - 补齐 geoip.metadb / geosite.dat，GEOIP 规则离线可用
             - 源码 commit: ${{ github.sha }}
             - mihomo 部署：刷入后在「系统管理 → 服务 → 启动脚本」加一行 `/usr/bin/mihomo-start &`，
