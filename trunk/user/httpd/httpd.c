@@ -343,18 +343,90 @@ is_safe_ifname(const char *ifname)
 		return 1;
 	return 0;
 }
-
 /*
  * 私网来源判定 (VPN / EasyTier / Tailscale 等)
  *
- * 背景: login_safe 原本只认"客户端 IP 与某个本机接口处于同一网段"。
- * EasyTier 的 tun 是点对点接口, 掩码常常是 /32, 于是:
+ * 背景: login_safe 原本只认"客户端 IP 与某个本机接口处于同一网段"
+ * (is_safe_ipaddr), 而它的接口白名单只有 br0 / OpenVPN tun / ppp10x。
+ * EasyTier 的 tun0 不在名单里, 于是:
  *   - 面板能打开 (读操作不受限)
  *   - 保存类动作全被拦 ("当前不是局域网/HTTPS 安全会话")
  *   - initial() 还会把"应用"按钮 disabled 掉, 表现为按不动
- * 这类客户端与 LAN 客户端安全等级相同 (公网无法伪造私网源地址完成 TCP
- * 三次握手), 因此把 RFC1918 / CGNAT / 链路本地一并视为安全来源。
+ *
+ * 判定不写死任何网段, 全部从运行时读取:
+ *   1) 先确认 EasyTier 的 tun 真的存在 (et_enable=1 且 et_ipv4 有值,
+ *      并且内核里确实有一个 UP 状态的接口持有该地址), 三者缺一不认;
+ *   2) 存在时用该接口自己的地址与掩码算子网, 源地址落在其中 => 安全。
+ *      换机型 / 换虚拟网段都不需要改代码。
+ *   3) 兜底 RFC1918 (10/8, 172.16/12, 192.168/16), 覆盖经 EasyTier
+ *      子网代理进来的远端 LAN 源地址。
+ *
+ * 不再把 CGNAT (100.64/10) 与链路本地 (169.254/16) 当作安全来源:
+ * 国内宽带 WAN 侧常落在 100.64/10, 放行它等于让公网侧会话也能刷机。
  */
+
+/*
+ * 源地址是否落在 EasyTier tun 的子网内。
+ * tun 不存在 / EasyTier 未启用 / 接口未 UP, 一律返回 0。
+ */
+static int
+in_easytier_subnet(const struct in_addr *ip4)
+{
+	struct ifaddrs *ifa, *ife;
+	const struct in_addr *addr4, *mask4;
+	struct in_addr et4;
+	const char *et_ip;
+	char buf[32];
+	int i, found = 0;
+
+	if (!ip4)
+		return 0;
+
+	/* 第 1 关: EasyTier 是否启用、是否分配了虚拟 IP */
+	if (nvram_get_int("et_enable") != 1)
+		return 0;
+
+	et_ip = nvram_safe_get("et_ipv4");
+	if (!et_ip || !*et_ip)
+		return 0;
+
+	/* 只取 IP 部分 (面板里可能带 /24), 解析失败就当没有 */
+	for (i = 0; i < (int)sizeof(buf) - 1 && et_ip[i] && et_ip[i] != '/'; i++)
+		buf[i] = et_ip[i];
+	buf[i] = '\0';
+
+	if (inet_pton(AF_INET, buf, &et4) != 1)
+		return 0;
+
+	/* 第 2 关: 内核里是否真的有接口持有这个地址且处于 UP */
+	if (getifaddrs(&ifa) < 0)
+		return 0;
+
+	for (ife = ifa; ife; ife = ife->ifa_next) {
+		if (!ife->ifa_addr || !ife->ifa_netmask)
+			continue;
+		if (ife->ifa_addr->sa_family != AF_INET)
+			continue;
+		if (!(ife->ifa_flags & IFF_UP))
+			continue;
+
+		addr4 = &((struct sockaddr_in *) ife->ifa_addr)->sin_addr;
+		if (addr4->s_addr != et4.s_addr)
+			continue;			/* 不是 EasyTier 的 tun */
+
+		/* 第 3 关: 用该接口自己的掩码算子网 */
+		mask4 = &((struct sockaddr_in *) ife->ifa_netmask)->sin_addr;
+		if (mask4->s_addr != 0 &&
+		    (ip4->s_addr & mask4->s_addr) == (addr4->s_addr & mask4->s_addr))
+			found = 1;
+		break;
+	}
+
+	freeifaddrs(ifa);
+
+	return found;
+}
+
 static int
 is_private_ipaddr(const uaddr *ip)
 {
@@ -384,6 +456,11 @@ is_private_ipaddr(const uaddr *ip)
 	if (!ip4)
 		return 0;
 
+	/* 1) 与 EasyTier tun 同网段 (段长从接口掩码读, 不写死) */
+	if (in_easytier_subnet(ip4))
+		return 1;
+
+	/* 2) 兜底: RFC1918, 覆盖远端 LAN 的源地址 */
 	a = (unsigned long) ntohl(ip4->s_addr);
 
 	if ((a & 0xff000000UL) == 0x0a000000UL)		/* 10.0.0.0/8    */
@@ -391,10 +468,6 @@ is_private_ipaddr(const uaddr *ip)
 	if ((a & 0xfff00000UL) == 0xac100000UL)		/* 172.16.0.0/12 */
 		return 1;
 	if ((a & 0xffff0000UL) == 0xc0a80000UL)		/* 192.168.0.0/16 */
-		return 1;
-	if ((a & 0xffc00000UL) == 0x64400000UL)		/* 100.64.0.0/10 (CGNAT) */
-		return 1;
-	if ((a & 0xffff0000UL) == 0xa9fe0000UL)		/* 169.254.0.0/16 */
 		return 1;
 
 	return 0;
