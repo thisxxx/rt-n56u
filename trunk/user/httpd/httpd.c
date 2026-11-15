@@ -359,11 +359,32 @@ static int
 is_private_ipaddr(const uaddr *ip)
 {
 	unsigned long a;
+	const struct in_addr *ip4 = NULL;
+#if defined (USE_IPV6)
+	struct in_addr ip4_6;
+	const struct in6_addr *ip6;
 
-	if (ip->family != AF_INET)
+	/*
+	 * httpd 双栈监听时 (ip6_service 非空 => AF_INET6 socket), IPv4 客户端
+	 * 以 IPv4-mapped 形式出现在 accept 结果里 (::ffff:a.b.c.d), family 是
+	 * AF_INET6。必须先拆回 in_addr 再比网段, 否则下面的判断全被 family
+	 * 挡掉, 表现为经 EasyTier / VPN 访问时面板按钮不可用。
+	 */
+	if (ip->family == AF_INET6) {
+		ip6 = &ip->addr.in6;
+		if (IN6_IS_ADDR_V4MAPPED(ip6)) {
+			ip4_6.s_addr = ip6->s6_addr32[3];
+			ip4 = &ip4_6;
+		}
+	} else
+#endif
+	if (ip->family == AF_INET)
+		ip4 = &ip->addr.in4;
+
+	if (!ip4)
 		return 0;
 
-	a = (unsigned long) ntohl(ip->addr.in4.s_addr);
+	a = (unsigned long) ntohl(ip4->s_addr);
 
 	if ((a & 0xff000000UL) == 0x0a000000UL)		/* 10.0.0.0/8    */
 		return 1;
