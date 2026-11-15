@@ -344,25 +344,8 @@ is_safe_ifname(const char *ifname)
 	return 0;
 }
 /*
- * EasyTier tun 的识别
- *
- * tun 的接口名和网段都不固定 (tun0 / tun1 / et0 ..., 10.x 还是 100.x 看用户填),
- * 都不能写死。做法: EasyTier 已启用且面板里填了虚拟 IP 时, 内核里持有该地址的
- * 接口就是 tun。在下面的接口白名单判定处放行它即可, 后续"同网段"比较仍走
- * is_safe_ipaddr() 原有逻辑 (掩码从该接口自己读), 不另写一套网段计算。
- */
-static int
-is_et_iface(const struct ifaddrs *ife, const struct in_addr *et4)
-{
-	if (!et4 || !ife->ifa_addr || ife->ifa_addr->sa_family != AF_INET)
-		return 0;
-
-	return (((const struct sockaddr_in *)ife->ifa_addr)->sin_addr.s_addr == et4->s_addr);
-}
-
-/*
  * 读 et_ipv4 -> in_addr
- * 未启用 / 没填 / 格式不对 一律返回 NULL, 此时不认任何 tun 接口
+ * 未启用 / 没填 / 格式不对 一律返回 NULL
  */
 static struct in_addr *
 get_et_addr(struct in_addr *out)
@@ -387,6 +370,100 @@ get_et_addr(struct in_addr *out)
 		return NULL;
 
 	return out;
+}
+
+/*
+ * 读 /proc/net/route, 按最长前缀匹配查 addr 走哪个接口
+ *
+ * 表里的数值是主机字节序的十六进制, 与 in_addr.s_addr 可直接按位比较
+ * (MIPS LE / x86 LE 均已验证)。只认 RTF_UP 表项; 默认路由掩码为 0,
+ * 没有更具体的路由时才轮到它。命中返回 0 并带回接口名, 否则返回 -1。
+ */
+static int
+route_ifname(unsigned long addr, char *ifname, size_t iflen)
+{
+	FILE *fp;
+	char line[256], ifn[32];
+	unsigned long dest, gw, flags, refcnt, use, metric, msk, best = 0;
+	int found = 0;
+
+	fp = fopen("/proc/net/route", "r");
+	if (!fp)
+		return -1;
+
+	if (!fgets(line, sizeof(line), fp)) {	/* 表头 */
+		fclose(fp);
+		return -1;
+	}
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (sscanf(line, "%31s %lx %lx %lx %lu %lu %lu %lx",
+			   ifn, &dest, &gw, &flags, &refcnt, &use, &metric, &msk) != 8)
+			continue;
+		if (!(flags & 0x1))		/* RTF_UP */
+			continue;
+		if ((dest & msk) != (addr & msk))
+			continue;
+		if (found && msk <= best)	/* 前缀更长者优先 */
+			continue;
+		best = msk;
+		found = 1;
+		snprintf(ifname, iflen, "%s", ifn);
+		if (msk == 0xffffffffUL)	/* 主机路由, 不会更长 */
+			break;
+	}
+
+	fclose(fp);
+
+	return found ? 0 : -1;
+}
+
+/*
+ * 源地址是不是从 EasyTier 隧道进来的
+ *
+ * 判据不取 tun 的掩码 (万一变成 /32 就只剩自己一个地址, 判定立即失效),
+ * 而是问内核: 去这个源地址的路由走哪个接口? 是 EasyTier 那个 tun 就算。
+ *
+ * 这样写有两个好处:
+ *   1. 与掩码无关 —— /24、/32、甚至将来换协议换网段都不影响;
+ *   2. 自洽 —— 客户端能把面板打开, 就说明回包路由一定指向 tun,
+ *      否则 TCP 根本握不上手, 这个判据不可能比实际链路更严。
+ *
+ * tun 接口仍要求真实存在: 内核里有接口持有 et_ipv4 且 UP。接口名不写死,
+ * tun0 / tun1 / et0 都行。
+ */
+static int
+is_et_tun_route(const struct in_addr *ip4, const struct in_addr *et4p)
+{
+	struct ifaddrs *ifa, *ife;
+	char et_if[32] = "", rt_if[32] = "";
+
+	if (!ip4 || !et4p)
+		return 0;
+
+	if (getifaddrs(&ifa) < 0)
+		return 0;
+	for (ife = ifa; ife; ife = ife->ifa_next) {
+		if (!ife->ifa_addr || !ife->ifa_name)
+			continue;
+		if (!(ife->ifa_flags & IFF_UP))
+			continue;
+		if (ife->ifa_addr->sa_family != AF_INET)
+			continue;
+		if (((struct sockaddr_in *)ife->ifa_addr)->sin_addr.s_addr != et4p->s_addr)
+			continue;
+		snprintf(et_if, sizeof(et_if), "%s", ife->ifa_name);
+		break;
+	}
+	freeifaddrs(ifa);
+
+	if (!et_if[0])
+		return 0;			/* tun 不存在或未 UP */
+
+	if (route_ifname((unsigned long) ip4->s_addr, rt_if, sizeof(rt_if)) != 0)
+		return 0;
+
+	return (strcmp(rt_if, et_if) == 0);
 }
 
 static int
@@ -417,8 +494,10 @@ is_safe_ipaddr(const uaddr *ip)
 	else
 		return 0;
 
-	/* EasyTier 启用并分配了虚拟 IP 时, 持有该地址的接口一并视为内网接口 */
+	/* 经 EasyTier 隧道进来的源地址: 按内核路由判定, 与 tun 掩码无关 */
 	et4p = get_et_addr(&et4);
+	if (is_et_tun_route(ip4, et4p))
+		return 1;
 
 	if (getifaddrs(&ifa) < 0)
 		return 0;
@@ -430,7 +509,7 @@ is_safe_ipaddr(const uaddr *ip)
 			continue;
 		if (!ife->ifa_name)
 			continue;
-		if (!is_safe_ifname(ife->ifa_name) && !is_et_iface(ife, et4p))
+		if (!is_safe_ifname(ife->ifa_name))
 			continue;
 #if defined (USE_IPV6)
 		if (ip6 && ife->ifa_addr->sa_family == AF_INET6) {
