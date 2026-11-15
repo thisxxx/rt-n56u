@@ -348,7 +348,7 @@ is_safe_ifname(const char *ifname)
  *
  * tun 的接口名和网段都不固定 (tun0 / tun1 / et0 ..., 10.x 还是 100.x 看用户填),
  * 都不能写死。做法: EasyTier 已启用且面板里填了虚拟 IP 时, 内核里持有该地址的
- * 接口就是 tun。把它加进 is_safe_ifname() 的白名单即可, 后面的"同网段"判定仍走
+ * 接口就是 tun。在下面的接口白名单判定处放行它即可, 后续"同网段"比较仍走
  * is_safe_ipaddr() 原有逻辑 (掩码从该接口自己读), 不另写一套网段计算。
  */
 static int
@@ -387,59 +387,6 @@ get_et_addr(struct in_addr *out)
 		return NULL;
 
 	return out;
-}
-
-/*
- * 私网来源判定
- *
- * 只回答"这个源地址是不是内网", 不判断是不是 WAN: WAN 侧能不能连进来归防火墙管
- * (rc/firewall_ex.c 里只有 misc_http_x=1 才放行 http_lanport, https_wopen=1 才放行
- * https_lport, 默认 DROP), httpd 不重复判一遍, 也不写死任何"WAN 网段"。
- *
- * 本函数只补 is_safe_ipaddr() 管不到的一种情况: 经 EasyTier 子网代理进来的
- * 远端 LAN 源地址 (对端 LAN 网段不在本机任何接口上, 匹配不到接口子网)。
- * tun 自己的网段由 is_safe_ipaddr() 负责。
- */
-static int
-is_private_ipaddr(const uaddr *ip)
-{
-	unsigned long a;
-	const struct in_addr *ip4 = NULL;
-#if defined (USE_IPV6)
-	struct in_addr ip4_6;
-	const struct in6_addr *ip6;
-
-	/*
-	 * httpd 双栈监听时 (ip6_service 非空 => AF_INET6 socket), IPv4 客户端
-	 * 以 IPv4-mapped 形式出现在 accept 结果里 (::ffff:a.b.c.d), family 是
-	 * AF_INET6。必须先拆回 in_addr 再比网段, 否则下面的判断全被 family
-	 * 挡掉, 表现为经 EasyTier / VPN 访问时面板按钮不可用。
-	 */
-	if (ip->family == AF_INET6) {
-		ip6 = &ip->addr.in6;
-		if (IN6_IS_ADDR_V4MAPPED(ip6)) {
-			ip4_6.s_addr = ip6->s6_addr32[3];
-			ip4 = &ip4_6;
-		}
-	} else
-#endif
-	if (ip->family == AF_INET)
-		ip4 = &ip->addr.in4;
-
-	if (!ip4)
-		return 0;
-
-	/* RFC1918: 覆盖经子网代理进来的远端 LAN 源地址 */
-	a = (unsigned long) ntohl(ip4->s_addr);
-
-	if ((a & 0xff000000UL) == 0x0a000000UL)		/* 10.0.0.0/8    */
-		return 1;
-	if ((a & 0xfff00000UL) == 0xac100000UL)		/* 172.16.0.0/12 */
-		return 1;
-	if ((a & 0xffff0000UL) == 0xc0a80000UL)		/* 192.168.0.0/16 */
-		return 1;
-
-	return 0;
 }
 
 static int
@@ -562,7 +509,7 @@ http_login(const uaddr *ip_now)
 		login_mac[0] = 0;
 
 	if (!get_ap_mode())
-		login_safe = is_safe_ipaddr(ip_now) || is_private_ipaddr(ip_now);
+		login_safe = is_safe_ipaddr(ip_now);
 	else
 		login_safe = 1;
 
