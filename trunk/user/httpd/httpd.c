@@ -354,11 +354,13 @@ is_safe_ifname(const char *ifname)
  *   - initial() 还会把"应用"按钮 disabled 掉, 表现为按不动
  *
  * 判定不写死任何网段, 全部从运行时读取:
- *   1) 先确认 EasyTier 的 tun 真的存在 (et_enable=1 且 et_ipv4 有值,
- *      并且内核里确实有一个 UP 状态的接口持有该地址), 三者缺一不认;
- *   2) 存在时用该接口自己的地址与掩码算子网, 源地址落在其中 => 安全。
- *      换机型 / 换虚拟网段都不需要改代码。
- *   3) 兜底 RFC1918 (10/8, 172.16/12, 192.168/16), 覆盖经 EasyTier
+ *   1) EasyTier tun 必须真实存在 (et_enable=1 且 et_ipv4 有值, 并且内核
+ *      里确有接口持有该地址且处于 UP), 三者缺一就不认 tun 段;
+ *   2) 存在时用该接口自己的掩码算子网, 源地址落在其中即为安全;
+ *      换机型 / 换虚拟网段都不用改代码;
+ *   3) WAN 接口的子网一律判负 (上游那台路由器的 LAN 能直达 WAN 地址,
+ *      不排除的话等于让上游邻居也能刷机);
+ *   4) 兜底 RFC1918 (10/8, 172.16/12, 192.168/16), 覆盖经 EasyTier
  *      子网代理进来的远端 LAN 源地址。
  *
  * 不再把 CGNAT (100.64/10) 与链路本地 (169.254/16) 当作安全来源:
@@ -366,39 +368,42 @@ is_safe_ifname(const char *ifname)
  */
 
 /*
- * 源地址是否落在 EasyTier tun 的子网内。
- * tun 不存在 / EasyTier 未启用 / 接口未 UP, 一律返回 0。
+ * 遍历一次接口表, 判定源地址的位置:
+ *   1  => 落在 EasyTier tun 的子网内 (tun 真实存在且 UP)
+ *  -1  => 落在 WAN 接口的子网内
+ *   0  => 两者都不是
  */
 static int
-in_easytier_subnet(const struct in_addr *ip4)
+classify_src_addr(const struct in_addr *ip4)
 {
 	struct ifaddrs *ifa, *ife;
 	const struct in_addr *addr4, *mask4;
 	struct in_addr et4;
-	const char *et_ip;
+	const char *et_ip, *wan;
 	char buf[32];
-	int i, found = 0;
+	int i, result = 0, have_et = 0;
 
 	if (!ip4)
 		return 0;
 
-	/* 第 1 关: EasyTier 是否启用、是否分配了虚拟 IP */
-	if (nvram_get_int("et_enable") != 1)
-		return 0;
+	/* WAN 接口名按 nvram 实际取值, 不按名字猜 */
+	wan = nvram_safe_get("wan_ifname");
+	if (!wan || !*wan)
+		wan = nvram_safe_get("wan0_ifname");
 
-	et_ip = nvram_safe_get("et_ipv4");
-	if (!et_ip || !*et_ip)
-		return 0;
+	/* 第 1 关: EasyTier 启用且分配了虚拟 IP, 才谈得上 tun 段 */
+	if (nvram_get_int("et_enable") == 1) {
+		et_ip = nvram_safe_get("et_ipv4");
+		if (et_ip && *et_ip) {
+			/* 只取 IP 部分 (面板里可能填成 10.0.0.1/24) */
+			for (i = 0; i < (int)sizeof(buf) - 1 && et_ip[i] && et_ip[i] != '/'; i++)
+				buf[i] = et_ip[i];
+			buf[i] = '\0';
+			if (inet_pton(AF_INET, buf, &et4) == 1)
+				have_et = 1;
+		}
+	}
 
-	/* 只取 IP 部分 (面板里可能带 /24), 解析失败就当没有 */
-	for (i = 0; i < (int)sizeof(buf) - 1 && et_ip[i] && et_ip[i] != '/'; i++)
-		buf[i] = et_ip[i];
-	buf[i] = '\0';
-
-	if (inet_pton(AF_INET, buf, &et4) != 1)
-		return 0;
-
-	/* 第 2 关: 内核里是否真的有接口持有这个地址且处于 UP */
 	if (getifaddrs(&ifa) < 0)
 		return 0;
 
@@ -411,20 +416,28 @@ in_easytier_subnet(const struct in_addr *ip4)
 			continue;
 
 		addr4 = &((struct sockaddr_in *) ife->ifa_addr)->sin_addr;
-		if (addr4->s_addr != et4.s_addr)
-			continue;			/* 不是 EasyTier 的 tun */
-
-		/* 第 3 关: 用该接口自己的掩码算子网 */
 		mask4 = &((struct sockaddr_in *) ife->ifa_netmask)->sin_addr;
-		if (mask4->s_addr != 0 &&
-		    (ip4->s_addr & mask4->s_addr) == (addr4->s_addr & mask4->s_addr))
-			found = 1;
-		break;
+		if (mask4->s_addr == 0)
+			continue;
+		if ((ip4->s_addr & mask4->s_addr) != (addr4->s_addr & mask4->s_addr))
+			continue;
+
+		/* WAN 子网命中: 优先判负 */
+		if (wan && *wan && !strcmp(ife->ifa_name, wan)) {
+			result = -1;
+			break;
+		}
+
+		/* 第 2/3 关: 接口真实持有 et_ipv4 且 UP, 才算 EasyTier tun */
+		if (have_et && addr4->s_addr == et4.s_addr) {
+			result = 1;
+			break;
+		}
 	}
 
 	freeifaddrs(ifa);
 
-	return found;
+	return result;
 }
 
 static int
@@ -432,6 +445,7 @@ is_private_ipaddr(const uaddr *ip)
 {
 	unsigned long a;
 	const struct in_addr *ip4 = NULL;
+	int cls;
 #if defined (USE_IPV6)
 	struct in_addr ip4_6;
 	const struct in6_addr *ip6;
@@ -456,11 +470,13 @@ is_private_ipaddr(const uaddr *ip)
 	if (!ip4)
 		return 0;
 
-	/* 1) 与 EasyTier tun 同网段 (段长从接口掩码读, 不写死) */
-	if (in_easytier_subnet(ip4))
-		return 1;
+	cls = classify_src_addr(ip4);
+	if (cls < 0)
+		return 0;		/* WAN 侧来源一律不认 */
+	if (cls > 0)
+		return 1;		/* EasyTier tun 段, 段长读自接口掩码 */
 
-	/* 2) 兜底: RFC1918, 覆盖远端 LAN 的源地址 */
+	/* 兜底: RFC1918, 覆盖经子网代理进来的远端 LAN 源地址 */
 	a = (unsigned long) ntohl(ip4->s_addr);
 
 	if ((a & 0xff000000UL) == 0x0a000000UL)		/* 10.0.0.0/8    */
