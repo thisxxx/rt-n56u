@@ -36,8 +36,10 @@ FW=/usr/bin/easytier-firewall
 NVRAM=/usr/sbin/nvram
 LOG=/tmp/easytier.log
 RUNDIR=/tmp/easytier
-LOG_MAX=65536		# 字节数, 超过就截断 (/tmp 是内存, 128MB 机器别留大日志)
+WATCH_PID=$RUNDIR/.logwatch.pid	# 日志守护 pid 文件
+LOG_MAX=1048576		# 上限 1MB, 超过即截断 (/tmp 是内存, 128MB 机器别留大日志)
 LOG_KEEP=300		# 截断后保留的最后行数
+LOG_CHECK=60		# 日志守护检查间隔(秒)
 
 log() {
 	logger -t easytier "$*" 2>/dev/null
@@ -52,6 +54,27 @@ running() {
 	pidof easytier-core >/dev/null 2>&1
 }
 
+# 日志大小守护: core 是长驻进程, 启动时的那一次截断检查之后再没人看文件大小,
+# INFO 级常规心跳每几秒一行, 11 天能滚出 24MB —— 2026-11-26 实测把 24MB 的 /tmp
+# 整个撑爆, 连累 mihomo 的 geo 数据和配置全写不出来 (磁盘满, 不是内存不足)。
+# 这里起个轻量循环定期查, 超限即截。
+# 注意: core 的 stdout 是 >> 追加句柄, 截断必须原地把文件写短 (cat > "$LOG"),
+# 不能 mv 换 inode —— 换了 inode core 会继续往旧 inode 里写, 空间不释放且不可见。
+log_watcher() {
+	while :; do
+		sleep "$LOG_CHECK"
+		running || break
+		[ -f "$LOG" ] || continue
+		sz=$(wc -c <"$LOG" 2>/dev/null)
+		case "$sz" in ''|*[!0-9]*) continue ;; esac
+		[ "$sz" -le "$LOG_MAX" ] && continue
+		tail -n "$LOG_KEEP" "$LOG" >"$LOG.tmp" 2>/dev/null || continue
+		cat "$LOG.tmp" >"$LOG" 2>/dev/null || : > "$LOG"
+		rm -f "$LOG.tmp"
+		logger -t easytier "日志超限($sz 字节), 已截断保留末尾 $LOG_KEEP 行"
+	done
+}
+
 # 把一个"空格分隔的多值"清洗成规范形式:
 #   去掉 \r (Windows 换行残留) -> 制表符/换行统一成空格 -> 连续空格压成一个
 # 首尾空格不用管: 后面 for v in $X 靠 IFS 拆词, 前导/尾随空白天然被忽略。
@@ -60,6 +83,11 @@ et_norm() {
 }
 
 do_stop() {
+	# 先杀日志守护: 不管 core 死活都清干净, restart 时旧守护不残留
+	if [ -f "$WATCH_PID" ]; then
+		kill "$(cat "$WATCH_PID" 2>/dev/null)" 2>/dev/null
+		rm -f "$WATCH_PID"
+	fi
 	running || return 0
 
 	killall easytier-core 2>/dev/null
@@ -99,6 +127,10 @@ do_start() {
 	HN=$(et_norm "$(get et_hostname)")
 	ET_LISTEN=$(et_norm "$(get et_listeners)")
 	LV=$(et_norm "$(get et_log_level)")
+	# 默认 error: core 自带默认 INFO, foreign network 的常规心跳每几秒一行,
+	# 11 天能滚出 24MB 撑爆 /tmp (2026-11-26 实测); error 只留真正的问题。
+	# 想看详细日志时在面板显式选 info/debug。
+	[ -z "$LV" ] && LV=error
 	NO_LISTEN=$(get et_no_listener)
 
 	[ -x "$BIN" ] || { log "错误: 找不到 $BIN"; return 1; }
@@ -204,6 +236,15 @@ do_start() {
 	fi
 
 	log "EasyTier 已启动 (pid $(pidof easytier-core))"
+
+	# 日志大小守护 (见 log_watcher 注释): 已在跑就不重复起
+	if [ -f "$WATCH_PID" ] && kill -0 "$(cat "$WATCH_PID" 2>/dev/null)" 2>/dev/null; then
+		:
+	else
+		rm -f "$WATCH_PID"
+		( trap '' HUP; log_watcher ) >/dev/null 2>&1 </dev/null &
+		echo $! > "$WATCH_PID"
+	fi
 
 	# 防火墙: 端口从本次实际生效的 et_listeners 现读, 面板换了监听口, 重启一次就跟随
 	[ -x "$FW" ] && "$FW" apply
