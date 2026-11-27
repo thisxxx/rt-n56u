@@ -367,7 +367,7 @@ tproxy-port: $TPROXY_PORT
 allow-lan: true
 bind-address: '*'
 mode: rule
-log-level: warning
+log-level: error
 external-controller: 0.0.0.0:9090
 external-ui: /usr/share/mihomo/ui
 dns:
@@ -521,7 +521,7 @@ do_fetch() {
 	# ---- 内置通用补丁 (只动顶层单行键, sed 安全) ----
 	sed -i \
 		-e "s/^allow-lan:.*/allow-lan: true/" \
-		-e "s/^log-level:.*/log-level: warning/" \
+		-e "s/^log-level:.*/log-level: error/" \
 		-e "s/^geo-auto-update:.*/geo-auto-update: false/" \
 		-e "s/^external-controller:.*/external-controller: 0.0.0.0:9090/" \
 		-e "s/^external-ui:.*/external-ui: \/usr\/share\/mihomo\/ui/" \
