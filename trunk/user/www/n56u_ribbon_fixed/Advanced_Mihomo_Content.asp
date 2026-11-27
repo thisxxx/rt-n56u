@@ -34,8 +34,6 @@ function initial(){
 	init_itoggle('mh_enable');
 	init_itoggle('mh_autostart');
 	init_itoggle('mh_fakeip');
-	init_itoggle('mh_slim');
-	slim_text_init();
 
 	if (!login_safe())
 		E('btn_apply').disabled = true;
@@ -170,39 +168,6 @@ function mihomo_apply_done(ok, msg){
 		alert(msg);
 }
 
-/* ================= 订阅精简 (sed 文本框) ================= */
-
-/* 文本框为空 = 用内置默认精简; 非空 = 整段替代内置精简 (sed -f 语法) */
-function slim_text_init(){
-	var t = document.getElementById('mh_slim_text');
-	if (t && trim_str(t.value) === '')
-		t.placeholder = SLIM_REF;
-}
-
-function slim_clear(){
-	if (!confirm('清空后恢复内置默认精简, 确定清空?'))
-		return;
-	var t = document.getElementById('mh_slim_text');
-	t.value = '';
-	t.placeholder = SLIM_REF;
-}
-
-/* 只读参考: 内置默认精简的动作清单 (与 mihomo-start 内置实现对应) */
-var SLIM_REF = [
-'# 内置默认精简(文本框留空时自动执行)的动作:',
-'#   1. rules 去重               (跨行处理, 脚本内置 awk)',
-'#   2. 截断 MATCH 之后的规则     (同上)',
-'#   3. 关闭 sniffer             (跨行处理, 内置 awk)',
-'#   4. dns.nameserver 只留前 3 条 (跨行处理, 内置 awk)',
-'#   5. geo-auto-update 关闭, 等效 sed:',
-'#        s/^geo-auto-update:.*/geo-auto-update: false/',
-'#',
-'# 注意: 你写了内容后, 上面 1-5 全部不再执行, 需要的行为要自己写。',
-'# 每行一条 sed 命令, 对订阅配置生效。常用示例:',
-'#   s/^log-level:.*/log-level: info/',
-'#   /- {name:.*香港-01/d        # 删除名字含 香港-01 的节点行',
-'#   s/香港-01/香港01/g          # 批量改名'
-].join('\n');
 function refresh_state(){
 	location.reload();
 }
@@ -359,45 +324,10 @@ function open_panel(){
                                         </tr>
 
                                         <tr>
-                                            <th>订阅精简<br><span style="font-weight: normal; color: #999;">默认关</span></th>
-                                            <td>
-                                                <div class="main_itoggle">
-                                                    <div id="mh_slim_on_of">
-                                                        <input type="checkbox" id="mh_slim_fake" <% nvram_match_x("", "mh_slim", "1", "value=1 checked"); %><% nvram_match_x("", "mh_slim", "0", "value=0"); %>>
-                                                    </div>
-                                                </div>
-                                                <div style="position: absolute; margin-left: -10000px;">
-                                                    <input type="radio" value="1" name="mh_slim" id="mh_slim_1" <% nvram_match_x("", "mh_slim", "1", "checked"); %>><#checkbox_Yes#>
-                                                    <input type="radio" value="0" name="mh_slim" id="mh_slim_0" <% nvram_match_x("", "mh_slim", "0", "checked"); %>><#checkbox_No#>
-                                                </div>
-                                                <span style="margin-left: 8px;"><% mihomo_slim_state(); %></span>
-                                                <div style="color: #999; margin-top: 4px;">
-                                                    开启后拉订阅时做针对性裁剪。改动点“应用”会自动重建配置生效。
-                                                </div>
-                                                <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #DDD; color: #555;">
-                                                    <div style="margin-bottom: 6px;">
-                                                        自定义精简 <b>sed</b>（每行一条，对订阅配置执行；
-                                                        <b>写了内容就整段替代内置精简，留空则用内置默认</b>）：
-                                                        &nbsp;<button class="btn btn-mini" type="button" onclick="slim_clear();">清空(用内置默认)</button>
-                                                    </div>
-                                                    <textarea name="mh_slim_text" id="mh_slim_text" rows="9" wrap="off" spellcheck="false"
-                                                              maxlength="4096"
-                                                              style="width: 96%; font-family: 'Courier New', monospace; font-size: 12px;"><% nvram_get_x("","mh_slim_text"); %></textarea>
-                                                    <div style="color: #999; margin-top: 4px;">
-                                                        改完点页面底部“应用本页面设置”保存；下次拉订阅(或手动 mihomo-start update)生效。
-                                                        sed 执行出错会自动回退内置精简，不会把订阅打碎。内置默认动作见文本框占位提示。
-                                                    </div>
-                                                </div>
-                                                </div>
-                                            </td>
-                                        </tr>
-
-                                        <tr>
                                             <th>订阅后处理<br><span style="font-weight: normal; color: #999;">my_sed.sh</span></th>
                                             <td>
                                                 <div style="color: #999; margin-bottom: 6px;">
-                                                    <b>与上面的精简开关无关</b>：精简关着也照样执行。执行顺序在精简之后，
-                                                    所以这里改的是“精简后的结果”。每次拉完订阅自动跑一次。
+                                                    每次拉完订阅、在内置补丁之后自动跑一次，用 <code>$1</code> 拿配置文件路径
                                                     脚本里用 <code>$1</code> 拿配置文件路径（<code>/tmp/mihomo/config.yaml</code>）。
                                                 </div>
                                                 <textarea name="mh_sed_text" id="mh_sed_text" rows="10" wrap="off" spellcheck="false"
@@ -475,13 +405,12 @@ mihomo-start start         用现有配置启动
 mihomo-start restart       重启 (不重新拉订阅)
 mihomo-start stop          停止
 mihomo-start status        看进程状态
-mihomo-start slim on|off|status   订阅精简开关
 mihomo-start fakeip on|off|status DNS fake-ip 模式开关 (on=假 IP, off=真实 IP)
 mihomo-start autostart     仅在 mh_autostart=1 时启动 (开机钩子调用)</pre>
                                         <div style="margin-top: 6px; color: #777;">
                                             订阅地址两处都认，<b>页面里的优先</b>：nvram <code>mh_sub_url</code> &gt; <code>/etc/storage/mihomo/sub_url.txt</code>。
                                             自定义 sed 钩子可直接在上面的文本框里改（存到 <code>/etc/storage/mihomo/my_sed.sh</code>，保存时自动落盘），
-                                            每次拉完订阅自动执行；执行顺序在精简之后，与精简开关无关。
+                                            每次拉完订阅、在内置补丁之后自动执行。
                                         </div>
                                     </div>
 
