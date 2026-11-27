@@ -2460,12 +2460,11 @@ easytier_action_hook(int eid, webs_t wp, int argc, char **argv)
 #define MH_LOG			"/tmp/mihomo.log"
 #define MH_COMM			"mihomo"
 #define MH_LOG_KEEP_LINES	40
-#define MH_SLIM_CONF		"/etc/storage/mihomo/slim.conf"
 #define MH_SUB_FILE		"/etc/storage/mihomo/sub_url.txt"
 #define MH_FETCH_STAT		"/tmp/mihomo/.fetch_status"
 /* mihomo-start 写的配置来源标记: normal=真实订阅 / fallback=内置兜底 */
 #define MH_MODE			"/tmp/mihomo/.mode"
-/* 订阅后处理脚本: 每次拉完订阅由 mihomo-start 执行, 与精简开关无关 */
+/* 订阅后处理脚本: 每次拉完订阅由 mihomo-start 执行 */
 #define MH_SED_FILE		"/etc/storage/mihomo/my_sed.sh"
 #define MH_CFG		"/tmp/mihomo/config.yaml"
 #define MH_SED_MAX		8192
@@ -2657,58 +2656,6 @@ mihomo_panel_url_hook(int eid, webs_t wp, int argc, char **argv)
 	return 0;
 }
 
-/* 读 slim.conf 这种 KEY=VALUE 文件里的一个整数值, 键不存在返回 def */
-static int
-mihomo_conf_int(const char *path, const char *key, int def)
-{
-	FILE *fp;
-	char line[128];
-	int n = strlen(key);
-
-	fp = fopen(path, "r");
-	if (!fp)
-		return def;
-	while (fgets(line, sizeof(line), fp)) {
-		if (!strncmp(line, key, n) && line[n] == '=') {
-			fclose(fp);
-			return atoi(line + n + 1);
-		}
-	}
-	fclose(fp);
-	return def;
-}
-
-/* nvram 里的参数: 空串当"没设过", 返回默认值而不是 0 */
-static int
-mihomo_nvram_int(const char *key, int def)
-{
-	const char *v = nvram_safe_get(key);
-
-	return (v && *v) ? atoi(v) : def;
-}
-
-/* 面板上的开关/参数 与 slim.conf 里的快照是否不一致。
- * 一致返回 0; 不一致返回 1, 调用方执行 slim on 重写快照 + 重建配置。 */
-static int
-mihomo_slim_changed(void)
-{
-	int on_nv, on_file;
-
-	on_nv = (nvram_get_int("mh_slim") == 1);
-	on_file = mihomo_conf_int(MH_SLIM_CONF, "SLIM", 0) == 1;
-
-	if (on_nv != on_file)
-		return 1;
-	if (!on_nv)			/* 两边都关, 没有参数可比 */
-		return 0;
-
-	return mihomo_conf_int(MH_SLIM_CONF, "SLIM_DEDUP", 1)            != mihomo_nvram_int("mh_slim_dedup", 1)
-	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_CUT_AFTER_MATCH", 1)  != mihomo_nvram_int("mh_slim_cut", 1)
-	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_DISABLE_SNIFFER", 1)  != mihomo_nvram_int("mh_slim_sniff", 1)
-	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_DNS_MAX", 3)          != mihomo_nvram_int("mh_slim_dnsmax", 3)
-	    || mihomo_conf_int(MH_SLIM_CONF, "SLIM_GEO_AUTOUPDATE", 0)   != mihomo_nvram_int("mh_slim_geoupd", 0);
-}
-
 /* fake-ip 开关 (nvram mh_fakeip) 与 /tmp 里现行配置的 enhanced-mode 是否不一致。
  * restart 沿用旧 CFG, 模式变了必须走 update 重建配置 —— 此时"应用"按钮
  * 自动升级成一次"更新订阅"。读不到配置文件返回 0 (不触发)。 */
@@ -2851,42 +2798,6 @@ mihomo_sed_get_hook(int eid, webs_t wp, int argc, char **argv)
 		}
 	}
 	free(buf);
-	return 0;
-}
-
-/* <% mihomo_slim_state(); %>  订阅精简开关的当前状态 */
-static int
-mihomo_slim_state_hook(int eid, webs_t wp, int argc, char **argv)
-{
-	char line[128];
-	int on = 0;
-
-	/* 标签只反映“实际生效”状态: do_slim 认的是 slim.conf 里的 SLIM=1,
-	 * nvram mh_slim 只是面板上的期望值, 两者不一致时另外补一句提示。 */
-	if (f_exists(MH_SLIM_CONF)) {
-		FILE *fp = fopen(MH_SLIM_CONF, "r");
-
-		if (fp) {
-			while (fgets(line, sizeof(line), fp)) {
-				line[strcspn(line, "\r\n")] = 0;
-				if (!strncmp(line, "SLIM=", 5)) {
-					on = (line[5] == '1');
-					break;
-				}
-			}
-			fclose(fp);
-		}
-	}
-
-	if (on)
-		websWrite(wp, "<span class=\"label label-success\">已应用</span>");
-	else
-		websWrite(wp, "<span class=\"label\">未开启</span>");
-
-	/* 开关与 slim.conf 不一致: 说明改了还没点“应用” */
-	if (mihomo_slim_changed())
-		websWrite(wp, "&nbsp;<span style=\"color:#C60;\">开关有改动，点“应用”生效</span>");
-
 	return 0;
 }
 
@@ -3130,12 +3041,6 @@ mihomo_action_hook(int eid, webs_t wp, int argc, char **argv)
 	/* fake-ip 开关和现行配置不一致 => restart 不够, 升级成一次重建 */
 	if (!do_update && mihomo_dns_mode_changed())
 		do_update = 1;
-
-	/* 订阅精简开关变了 => 先把 slim.conf 对齐, 再重建配置才生效 */
-	if (mihomo_slim_changed()) {
-		doSystem("%s slim %s", MH_CTL, nvram_get_int("mh_slim") ? "on" : "off");
-		do_update = 1;
-	}
 
 	/* 面板上点了“保存脚本”: 只有显式提交这个标记才写文件,
 	 * 避免普通“应用”把文本框里的旧内容覆盖到刚在 SSH 里改过的文件上 */
@@ -5320,7 +5225,6 @@ struct ej_handler ej_handlers[] =
 	{ "mihomo_running",		mihomo_running_hook},
 	{ "mihomo_status",		mihomo_status_hook},
 	{ "mihomo_panel_url",		mihomo_panel_url_hook},
-	{ "mihomo_slim_state",	mihomo_slim_state_hook},
 	{ "mihomo_sed_get",		mihomo_sed_get_hook},
 	{ "mihomo_log",		mihomo_log_hook},
 	{ "mihomo_action",		mihomo_action_hook},
