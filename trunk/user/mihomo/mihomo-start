@@ -28,28 +28,12 @@
 #      /etc/storage/mihomo/sub_url.txt      一行, 填 clash 格式订阅 URL
 #                                           (Web 界面的 mh_sub_url 优先于本文件)
 #
-# 2. 订阅精简开关 (可选, 默认关闭):
-#      推荐在 Web 界面「高级设置 -> Mihomo」用开关 + 下拉框控制参数;
-#      面板存 nvram (mh_slim / mh_slim_dedup / mh_slim_cut / mh_slim_sniff /
-#      mh_slim_dnsmax / mh_slim_geoupd), 再快照成下面的文件供本脚本读取。
-#      /etc/storage/mihomo/slim.conf        存在且 SLIM=1 时启用
-#      快捷命令: mihomo-start slim on|off|status
-#      可调项 (全部省略则用内置默认):
-#        SLIM=1                    总开关
-#        SLIM_DEDUP=1              rules 内完全相同行去重
-#        SLIM_CUT_AFTER_MATCH=1    截断 MATCH 兜底之后的规则 (永远命中不到)
-#        SLIM_DISABLE_SNIFFER=1    关闭 sniffer (域名嗅探, 省 CPU 与内存)
-#        SLIM_DNS_MAX=3            nameserver 只保留前 N 条, 0=不动
-#        SLIM_GEO_AUTOUPDATE=0     关闭 geo-auto-update
-#      命令行 slim on 会用 nvram 里的参数 (没设过就用默认) 重写这份快照;
-#      手工改文件里的参数同样有效, 但要再跑一次 mihomo-start update。
-#      作用范围: 只动订阅回来的配置副本, 不改订阅源; 精简后仍走 mihomo -t 校验,
-#                校验不过会自动回滚到旧配置, 不会把路由器搞挂。
-#
-# 3. 自定义 sed 钩子 (每次更新规则后自动执行):
+# 2. 订阅后处理脚本 (每次更新规则后自动执行):
 #      /etc/storage/mihomo/my_sed.sh        可执行脚本
 #      参数 $1 = 刚拉取的配置文件路径 (/tmp/mihomo/config.yaml.new)
 #      执行时机: 内置通用补丁之后、mihomo 校验之前 (校验失败会回滚到旧配置)
+#      默认内容: 首次 update/开机时自动生成一份精简脚本; 已存在且非空则不覆盖
+#                (见 ensure_user_sed_default), 用户改过的内容始终优先。
 #      示例内容:
 #        #!/bin/sh
 #        CFG="$1"
@@ -87,8 +71,6 @@ SUB_URL_FILE=$STOR/sub_url.txt
 # 用于固件没有 TLS 能力 / 订阅站被墙 / 机场只给 https 的场合
 SUB_LOCAL=$STOR/sub.yaml
 USER_SED=$STOR/my_sed.sh
-SLIM_CONF=$STOR/slim.conf
-STATF=/tmp/mihomo/.slimstat
 # 拉订阅的进度标记, 供 Web 页面轮询: running / ok / fail
 FETCH_STAT=/tmp/mihomo/.fetch_status
 # 当前跑的是真实订阅还是内置兜底: normal / fallback
@@ -131,17 +113,6 @@ SPLIT_CONF=/etc/storage/dnsmasq/dnsmasq.conf
 SPLIT_B='# --- mihomo split-dns begin (auto) ---'
 SPLIT_E='# --- mihomo split-dns end (auto) ---'
 
-# 统计 rules 段里的规则条数
-count_rules() {
-	awk '
-	/^rules:[ \t]*$/ {f=1; next}
-	f && /^[ \t]*-[ \t]/ {n++; next}
-	f && $0 != "" && $0 !~ /^[ \t]/ {f=0}
-	END {print n+0}
-	' "$1" 2>/dev/null
-}
-
-# 精简参数取值: nvram (面板上改的) > 调用方给的默认值
 # ============ 内网域名解析 (split DNS, 独立于 mihomo) ============
 # 只收合法域名 + IPv4, 坏行静默跳过 (面板 JS 有前置校验, 这里是最后一道防线)
 split_entries() {
@@ -185,149 +156,6 @@ apply_split_dns() {
 	fi
 	rm -f "$RUNDIR/.split.ent" "$RUNDIR/.split.base" "$RUNDIR/.split.new" "$RUNDIR/.split.block"
 }
-
-slim_nv() {
-	_x=$(nvram get "$1" 2>/dev/null)
-	[ -n "$_x" ] && printf '%s' "$_x" || printf '%s' "$2"
-}
-
-# 把"当前生效参数"写成快照 slim.conf。面板改完参数后 httpd 会比对这份快照,
-# 不一致就重新执行 slim on + update, 所以这里的格式要和 httpd 的解析对齐。
-slim_write_conf() {
-	mkdir -p "$STOR"
-	{
-		echo '# 由 Web 面板 / mihomo-start slim on 生成: 总开关 + 参数快照'
-		echo '# 面板上改参数即可, 改完点"应用"; 手工改这里要再跑 mihomo-start update'
-		echo 'SLIM=1'
-		echo "SLIM_DEDUP=$(slim_nv mh_slim_dedup 1)"
-		echo "SLIM_CUT_AFTER_MATCH=$(slim_nv mh_slim_cut 1)"
-		echo "SLIM_DISABLE_SNIFFER=$(slim_nv mh_slim_sniff 1)"
-		echo "SLIM_DNS_MAX=$(slim_nv mh_slim_dnsmax 3)"
-		echo "SLIM_GEO_AUTOUPDATE=$(slim_nv mh_slim_geoupd 0)"
-	} > "$SLIM_CONF"
-}
-
-# ---------------------------------------------------------------------------
-# 订阅精简 (只改 /tmp 里的副本, 不动订阅源; 有开关, 失败自动跳过)
-# 开关文件 $SLIM_CONF 不存在 => 完全不处理, 保持原样
-# ---------------------------------------------------------------------------
-do_slim() {
-	F="$1"
-	# 开关有两个入口, 任一为真即启用, 两处由 slim on/off 同步成一致:
-	#   nvram mh_slim=1   面板上的开关
-	#   slim.conf SLIM=1  命令行 mihomo-start slim on
-	ENABLED=0
-	[ "$(nvram get mh_slim 2>/dev/null)" = "1" ] && ENABLED=1
-	# 参数固定为内置默认 (面板上的 5 个下拉开关已移除, 精简细节改由
-	# mh_slim_text 文本框整段接管; 这里保留读 slim.conf 的 SLIM=1 总开关,
-	# 命令行 mihomo-start slim on/off 依旧可用)
-	SLIM_DEDUP=1
-	SLIM_CUT_AFTER_MATCH=1
-	SLIM_DISABLE_SNIFFER=1
-	SLIM_DNS_MAX=3
-	SLIM_GEO_AUTOUPDATE=0
-	if [ -f "$SLIM_CONF" ]; then
-		# shellcheck disable=SC1090
-		. "$SLIM_CONF" 2>/dev/null
-		[ "${SLIM:-0}" = "1" ] && ENABLED=1
-	fi
-	[ "$ENABLED" = "1" ] || return 0
-	: "${SLIM_DEDUP:=1}"
-	: "${SLIM_CUT_AFTER_MATCH:=1}"
-	: "${SLIM_DISABLE_SNIFFER:=1}"
-	: "${SLIM_DNS_MAX:=3}"
-	: "${SLIM_GEO_AUTOUPDATE:=0}"
-
-	cp -f "$F" "$RUNDIR/config.yaml.preslim" 2>/dev/null
-	B=$(wc -c < "$F" | tr -d ' ')
-	R0=$(count_rules "$F")
-	log "订阅精简: 开始 (规则 $R0 条, $B 字节)"
-
-	# ---- 1) rules 去重 + 截断 MATCH 之后的规则 ----
-	if [ "$SLIM_DEDUP" = "1" ] || [ "$SLIM_CUT_AFTER_MATCH" = "1" ]; then
-		awk -v dd="$SLIM_DEDUP" -v cm="$SLIM_CUT_AFTER_MATCH" -v st="$STATF" '
-		BEGIN { inr=0; cut=0; n=0; d=0; t=0 }
-		{
-			if (inr == 0) {
-				if ($0 ~ /^rules:[ \t]*$/) { inr=1; print; next }
-				print; next
-			}
-			if ($0 ~ /^[ \t]*-[ \t]/) {
-				if (cut == 1) { t++; next }
-				if (dd == "1" && ($0 in seen)) { d++; next }
-				seen[$0] = 1; print; n++
-				if (cm == "1" && $0 ~ /^[ \t]*-[ \t]*MATCH[,]/) cut=1
-				next
-			}
-			inr = 0; print
-		}
-		END { printf "%d %d %d\n", n, d, t > st }
-		' "$F" > "$F.slim" 2>/dev/null
-		if [ -s "$F.slim" ]; then
-			NR1=$(cut -d' ' -f1 "$STATF" 2>/dev/null)
-			NDUP=$(cut -d' ' -f2 "$STATF" 2>/dev/null)
-			NCUT=$(cut -d' ' -f3 "$STATF" 2>/dev/null)
-			mv -f "$F.slim" "$F"
-			log "  rules: 保留 ${NR1:-?} 条 (去重 ${NDUP:-0}, MATCH 后截断 ${NCUT:-0})"
-		else
-			log "  rules 精简失败, 跳过这一项"
-			rm -f "$F.slim"
-		fi
-	fi
-
-	# ---- 2) 关闭 sniffer ----
-	if [ "$SLIM_DISABLE_SNIFFER" = "1" ]; then
-		awk '
-		{
-			if (skip == 1) {
-				if ($0 ~ /^[^ \t#]/) { skip = 0 } else { next }
-			}
-			if ($0 ~ /^sniffer:[ \t]*$/) { skip = 1; next }
-			if ($0 ~ /^sniffer:[ \t]*\{/) { sub(/enable:[ \t]*true/, "enable: false"); print; next }
-			print
-		}
-		' "$F" > "$F.slim" 2>/dev/null
-		if [ -s "$F.slim" ]; then mv -f "$F.slim" "$F"; log "  sniffer: 已关闭"; else rm -f "$F.slim"; fi
-	fi
-
-	# ---- 3) DNS nameserver 只留前 N 条 ----
-	if [ "${SLIM_DNS_MAX:-0}" -gt 0 ] 2>/dev/null; then
-		awk -v mx="$SLIM_DNS_MAX" '
-		BEGIN { m=0; c=0 }
-		{
-			if (m == 1) {
-				if ($0 ~ /^[ \t]*-[ \t]/) { c++; if (c > mx) next; print; next }
-				m = 0
-			}
-			if ($0 ~ /^[ \t]*nameserver:[ \t]*$/) { m=1; c=0; print; next }
-			print
-		}
-		' "$F" > "$F.slim" 2>/dev/null
-		if [ -s "$F.slim" ]; then mv -f "$F.slim" "$F"; log "  dns.nameserver: 保留前 $SLIM_DNS_MAX 条"; else rm -f "$F.slim"; fi
-	fi
-
-	# ---- 4) 关 geo 自动更新 ----
-	if [ "$SLIM_GEO_AUTOUPDATE" = "0" ] && grep -q "^geo-auto-update:" "$F"; then
-		sed -i 's/^geo-auto-update:.*/geo-auto-update: false/' "$F"
-		log "  geo-auto-update: 已关闭"
-	fi
-
-	# ---- 5) 兜底: 规则被削光说明精简逻辑出错, 回滚 ----
-	R1=$(count_rules "$F")
-	if [ "$R1" -lt 1 ]; then
-		log "精简后规则为 0, 判定异常, 已回滚"
-		cp -f "$RUNDIR/config.yaml.preslim" "$F"
-		return 1
-	fi
-	A=$(wc -c < "$F" | tr -d ' ')
-	log "订阅精简: 完成 (规则 $R0 -> $R1, 体积 $B -> $A 字节)"
-	# 精简前的副本只用于上面那个回滚, 成功后就删掉:
-	# /tmp 是 tmpfs, 留一份完整配置等于白白多吃几百 KB 到 1 MB 内存。
-	# 想事后比对的话, 前面日志里已记录规则条数与字节数。
-	rm -f "$RUNDIR/config.yaml.preslim"
-	return 0
-}
-
 
 # ---------------------------------------------------------------------------
 # geo 数据补种
@@ -404,7 +232,53 @@ sub_url_get() {
 	head -n1 "$SUB_URL_FILE" | tr -d '\r\n '
 }
 
+# ---------------------------------------------------------------------------
+# 订阅后处理脚本的默认内容 (开箱即用)
+#   /etc/storage/mihomo/my_sed.sh 不存在或为空时, 写入一份精简脚本并持久化,
+#   让刷机后首次 update 就自动精简, 无需在面板点任何按钮。
+#   已存在且非空 => 完全不动, 尊重用户内容。
+#   /etc/storage 可能尚未挂载/不可写: 写失败只 log 警告, 绝不影响 mihomo 启动。
+# ---------------------------------------------------------------------------
+ensure_user_sed_default() {
+	[ -s "$USER_SED" ] && return 0
+
+	mkdir -p "$STOR" 2>/dev/null || {
+		log "警告: 无法创建 $STOR, 跳过默认订阅后处理脚本生成"
+		return 0
+	}
+	_tmp="$USER_SED.default.$$"
+	# 引号界定符: 下面的 $1 / $CFG / ! / 中文全部原样落盘, 不被 shell 展开
+	cat > "$_tmp" <<'EOF'
+#!/bin/sh
+# $1 = 配置文件路径
+CFG="$1"
+sed -i 's/^log-level: warning$/log-level: error/' "$CFG"
+sed -i '/^ - .*选择节点/d; /^ - .*动画疯/d; /^ - .*Steam 商店/d; /^ - .*Cloudflare/d; /^ - .*OneDrive/d' "$CFG"
+for g in 动画疯 'Steam 商店' Cloudflare OneDrive; do
+  sed -i "/^  - name: .*$g/,/^  - name:/{ /^  - name: .*$g/d; /^  - name:/!d; }" "$CFG"
+done
+EOF
+	if [ ! -s "$_tmp" ]; then
+		log "警告: 默认订阅后处理脚本写入失败, 跳过"
+		rm -f "$_tmp" 2>/dev/null
+		return 0
+	fi
+	if ! mv -f "$_tmp" "$USER_SED" 2>/dev/null; then
+		log "警告: 默认订阅后处理脚本落位失败, 跳过"
+		rm -f "$_tmp" 2>/dev/null
+		return 0
+	fi
+	chmod 744 "$USER_SED" 2>/dev/null || log "警告: $USER_SED chmod 744 失败"
+	if ! mtd_storage.sh save >/dev/null 2>&1; then
+		log "警告: mtd_storage.sh save 失败, 默认订阅后处理脚本可能重启后丢失"
+	fi
+	log "已生成默认订阅后处理脚本: $USER_SED"
+	return 0
+}
+
 do_fetch() {
+	# 生成默认订阅后处理脚本 (幂等; 必须早于拉订阅, 首次 update/开机即生效)
+	ensure_user_sed_default
 	SUB_URL=$(sub_url_get)
 	mkdir -p "$RUNDIR"
 	# 必须在 mihomo -t 之前补种: 校验阶段解析到 GEOIP 规则同样会触发下载
@@ -560,24 +434,6 @@ do_fetch() {
 	fi
 	# geo 自动更新会定期拉全量库(8+4 MiB), 128MB 机器扛不住, 统一关掉
 	grep -q "^geo-auto-update:" "$CFG_NEW" || sed -i "1i geo-auto-update: false" "$CFG_NEW"
-
-	# ---- 订阅精简 (开关: $SLIM_CONF 内 SLIM=1; 在用户钩子之前, 用户改动不会被覆盖) ----
-	# 精简二选一: mh_slim_text 非空 -> 用户 sed 整段替代内置精简 (sed -f 语法)
-	#            mh_slim_text 为空 -> 内置默认精简; 用户 sed 出错回退内置
-	SLIMTXT=$(nvram get mh_slim_text 2>/dev/null | tr -d '\r')
-	if [ "$(nvram get mh_slim 2>/dev/null)" = "1" ] && [ -n "$SLIMTXT" ]; then
-		printf '%s\n' "$SLIMTXT" > "$RUNDIR/slim_user.sed"
-		if sed -f "$RUNDIR/slim_user.sed" "$CFG_NEW" > "$CFG_NEW.slim" 2>>"$LOG"; then
-			mv -f "$CFG_NEW.slim" "$CFG_NEW"
-			log "订阅精简: 用户自定义 sed 已生效 (替代内置精简, $(grep -c . "$RUNDIR/slim_user.sed") 行指令)"
-		else
-			rm -f "$CFG_NEW.slim"
-			log "警告: 用户精简 sed 执行出错, 回退内置精简"
-			do_slim "$CFG_NEW" || log "精简未生效, 按原配置继续"
-		fi
-	else
-		do_slim "$CFG_NEW" || log "精简未生效, 按原配置继续"
-	fi
 
 	# ---- 用户自定义 sed 钩子: 每次更新规则后必执行 ----
 	if [ -x "$USER_SED" ]; then
@@ -841,32 +697,6 @@ case "$1" in
 			*) echo "用法: mihomo-start fakeip [on|off|status]"; exit 1 ;;
 		esac
 		;;
-	slim)
-		case "$2" in
-			on)
-				slim_write_conf
-				# 同步面板开关, 两处状态保持一致
-				nvram set mh_slim=1
-				nvram commit >/dev/null 2>&1
-				log "精简已开启: $SLIM_CONF (执行 mihomo-start update 生效)"
-				;;
-			off)
-				rm -f "$SLIM_CONF"
-				nvram set mh_slim=0
-				nvram commit >/dev/null 2>&1
-				log "精简已关闭: 下次 update 恢复订阅原始内容"
-				;;
-			status)
-				if [ -f "$SLIM_CONF" ] || [ "$(nvram get mh_slim 2>/dev/null)" = "1" ]; then
-					echo "精简: 开"
-					[ -f "$SLIM_CONF" ] && cat "$SLIM_CONF"
-				else
-					echo "精简: 关  (无 $SLIM_CONF, mh_slim=0)"
-				fi
-				;;
-			*) echo "用法: mihomo-start slim [on|off|status]"; exit 1 ;;
-		esac
-		;;
 	start|"") do_start ;;
-	*) echo "用法: mihomo-start [start|update|restart|stop|status|autostart|splitdns|fakeip on|off|status|slim on|off|status]"; exit 1 ;;
+	*) echo "用法: mihomo-start [start|update|restart|stop|status|autostart|splitdns|fakeip on|off|status]"; exit 1 ;;
 esac
